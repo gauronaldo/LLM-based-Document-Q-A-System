@@ -1,0 +1,6 @@
+Sinh viên phải hoàn
+thành tối thiểu 65 % tổng số tín chỉ để được đăng ký thực tập.
+
+Sinh viên cần có điểm trung bình tích lũy đạt yêu cầu của khoa.
+
+Những câu hỏi không có trong tài liệu cần được hệ thống từ chối trả lời.

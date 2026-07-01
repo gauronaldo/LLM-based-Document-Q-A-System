@@ -45,3 +45,15 @@ def test_splitter_builds_docx_paragraph_chunk_id() -> None:
 
     assert chunks[0]["chunk_id"] == "docx1_paragraph_2_chunk_0"
     assert chunks[0]["metadata"]["paragraph_index"] == 2
+
+
+def test_overlap_does_not_start_mid_word() -> None:
+    splitter = TextSplitter(chunk_size=35, chunk_overlap=10)
+
+    chunk = splitter._with_overlap(
+        "Candidates receive internship support",
+        "They can become full-time employees.",
+    )
+
+    assert chunk.startswith("support\n\n")
+    assert not chunk.startswith("pport")

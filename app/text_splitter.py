@@ -124,15 +124,32 @@ class TextSplitter:
         return [chunk for chunk in chunks if chunk]
 
     def _with_overlap(self, previous: str, next_text: str) -> str:
-        """Start a new chunk with a small tail from the previous chunk."""
+        """Start a new chunk with a word-aware tail from the previous chunk."""
 
         if self.chunk_overlap == 0:
             return next_text
 
-        overlap = previous[-self.chunk_overlap :].strip()
+        overlap = self._word_aware_tail(previous)
         if not overlap:
             return next_text
         return f"{overlap}\n\n{next_text}"
+
+    def _word_aware_tail(self, text: str) -> str:
+        """Return an overlap tail that does not begin in the middle of a word."""
+
+        tail = text[-self.chunk_overlap :].strip()
+        if not tail:
+            return ""
+
+        original_start = len(text) - self.chunk_overlap
+        starts_at_boundary = original_start <= 0 or text[original_start - 1].isspace()
+        if starts_at_boundary:
+            return tail
+
+        first_space = tail.find(" ")
+        if first_space == -1:
+            return ""
+        return tail[first_space + 1 :].strip()
 
     @staticmethod
     def _build_chunk_id(metadata: dict[str, Any]) -> str:

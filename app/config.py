@@ -17,7 +17,7 @@ class AppConfig:
     """Runtime settings for the document QA application."""
 
     llm_provider: str = os.getenv("LLM_PROVIDER", "gemini")
-    llm_model: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+    llm_model: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     embedding_model: str = os.getenv(
@@ -39,4 +39,3 @@ def get_config() -> AppConfig:
     """Return application configuration."""
 
     return AppConfig()
-
