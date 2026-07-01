@@ -1,0 +1,4 @@
+question,expected_answer,source_file,source_page,is_answerable
+"Sinh viên cần điều kiện gì để được đăng ký thực tập?","TODO","sample_vietnamese_document.pdf",1,true
+"Thông tin này không có trong tài liệu mẫu là gì?","Tôi không tìm thấy thông tin này trong tài liệu được cung cấp.","sample_vietnamese_document.pdf",,false
+
