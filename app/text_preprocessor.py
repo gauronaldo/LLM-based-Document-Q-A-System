@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from app.heading_detector import line_looks_like_heading
+
 
 class VietnameseTextPreprocessor:
     """Clean document and query text while preserving Vietnamese accents."""
@@ -32,16 +34,55 @@ class VietnameseTextPreprocessor:
 
     @staticmethod
     def _fix_line_breaks(text: str) -> str:
-        """Join wrapped lines while keeping paragraph boundaries."""
+        """Join wrapped lines while preserving visible section headings."""
 
         paragraphs = re.split(r"\n\s*\n", text)
         fixed_paragraphs = []
 
         for paragraph in paragraphs:
             lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
-            fixed_paragraphs.append(" ".join(lines))
+            fixed_paragraphs.extend(VietnameseTextPreprocessor._fix_paragraph_lines(lines))
 
         return "\n\n".join(paragraph for paragraph in fixed_paragraphs if paragraph)
+
+    @staticmethod
+    def _fix_paragraph_lines(lines: list[str]) -> list[str]:
+        fixed: list[str] = []
+        buffer: list[str] = []
+        index = 0
+
+        while index < len(lines):
+            line = lines[index]
+            next_line = lines[index + 1] if index + 1 < len(lines) else ""
+
+            heading = VietnameseTextPreprocessor._heading_from_line_pair(line, next_line)
+            if heading:
+                if buffer:
+                    fixed.append(" ".join(buffer))
+                    buffer = []
+                fixed.append(heading)
+                index += 2 if heading != line and next_line else 1
+                continue
+
+            buffer.append(line)
+            index += 1
+
+        if buffer:
+            fixed.append(" ".join(buffer))
+
+        return fixed
+
+    @staticmethod
+    def _heading_from_line_pair(line: str, next_line: str) -> str | None:
+        if line_looks_like_heading(line):
+            return line
+
+        if re.fullmatch(r"\d+(?:\.\d+)*[.)]?", line) and next_line:
+            candidate = f"{line} {next_line}"
+            if line_looks_like_heading(candidate):
+                return candidate
+
+        return None
 
     @staticmethod
     def _collapse_spaces(text: str) -> str:

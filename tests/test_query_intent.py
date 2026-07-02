@@ -12,6 +12,7 @@ from app.query_intent import (
 
 def test_detect_query_intent() -> None:
     assert detect_query_intent("Summarize this document") == INTENT_SUMMARY
+    assert detect_query_intent("give me the conclusion") == INTENT_QA
     assert detect_query_intent("Compare these two requirements") == INTENT_COMPARISON
     assert detect_query_intent("Explain this rule") == INTENT_EXPLANATION
     assert detect_query_intent("List the requirements") == INTENT_EXTRACTION

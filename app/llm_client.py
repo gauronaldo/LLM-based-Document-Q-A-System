@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from typing import Iterator
 
 
 class LLMClientError(Exception):
@@ -45,6 +46,21 @@ class LLMClient:
             f"Unsupported LLM provider '{self.provider}'. "
             "Supported providers are: gemini, openai, ollama."
         )
+
+    def generate_stream(self, prompt: str) -> Iterator[str]:
+        """Stream response chunks when the provider supports it."""
+
+        if not prompt.strip():
+            raise LLMClientError("Prompt cannot be empty.")
+
+        if self.provider == "ollama":
+            yield from self._generate_ollama_stream(prompt)
+            return
+        if self.provider == "openai":
+            yield from self._generate_openai_stream(prompt)
+            return
+
+        yield self.generate(prompt)
 
     def _generate_gemini(self, prompt: str) -> str:
         """Generate text with Gemini."""
@@ -111,18 +127,67 @@ class LLMClient:
             raise LLMClientError("OpenAI returned an empty response.")
         return content.strip()
 
+    def _generate_openai_stream(self, prompt: str) -> Iterator[str]:
+        """Stream text with OpenAI chat completions."""
+
+        if not self.openai_api_key:
+            raise LLMClientError("OPENAI_API_KEY is required when LLM_PROVIDER=openai.")
+
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise LLMClientError(
+                "openai is required for OpenAI models. "
+                "Install project dependencies with 'pip install -r requirements.txt'."
+            ) from exc
+
+        try:
+            client = OpenAI(api_key=self.openai_api_key)
+            stream = client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You answer document questions using only supplied context.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                stream=True,
+            )
+            for event in stream:
+                delta = event.choices[0].delta.content
+                if delta:
+                    yield delta
+        except Exception as exc:
+            raise LLMClientError(f"OpenAI streaming request failed: {exc}") from exc
+
     def _generate_ollama(self, prompt: str) -> str:
         """Generate text with a local Ollama server."""
 
         payload = json.dumps(
             {
                 "model": self.model_name,
-                "prompt": prompt,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a document-grounded assistant. Follow the user's "
+                            "language instruction exactly. Use only compact numeric "
+                            "citations like [1]."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 700,
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
-            f"{self.ollama_base_url}/api/generate",
+            f"{self.ollama_base_url}/api/chat",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -136,7 +201,56 @@ class LLMClient:
         except Exception as exc:
             raise LLMClientError(f"Failed to parse Ollama response: {exc}") from exc
 
-        text = data.get("response", "")
+        message = data.get("message", {})
+        text = message.get("content", "") if isinstance(message, dict) else ""
         if not text:
             raise LLMClientError("Ollama returned an empty response.")
         return text.strip()
+
+    def _generate_ollama_stream(self, prompt: str) -> Iterator[str]:
+        """Stream text with a local Ollama server."""
+
+        payload = json.dumps(
+            {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a document-grounded assistant. Follow the user's "
+                            "language instruction exactly. Use only compact numeric "
+                            "citations like [1]."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": True,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 700,
+                },
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.ollama_base_url}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                for line in response:
+                    if not line.strip():
+                        continue
+                    data = json.loads(line.decode("utf-8"))
+                    message = data.get("message", {})
+                    text = message.get("content", "") if isinstance(message, dict) else ""
+                    if text:
+                        yield text
+                    if data.get("done"):
+                        break
+        except urllib.error.URLError as exc:
+            raise LLMClientError(f"Ollama streaming request failed: {exc}") from exc
+        except Exception as exc:
+            raise LLMClientError(f"Failed to parse Ollama streaming response: {exc}") from exc

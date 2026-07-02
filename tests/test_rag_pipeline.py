@@ -32,8 +32,10 @@ class FakeSplitter:
 
 
 class FakeEmbedder:
-    def encode(self, texts):
+    def encode(self, texts, progress_callback=None):
         self.last_texts = texts
+        if progress_callback:
+            progress_callback(len(texts), len(texts))
         return [[0.1, 0.2] for _ in texts]
 
 
@@ -57,25 +59,49 @@ class FakeRetriever:
         self.last_top_k = None
         self.last_similarity_threshold = None
 
-    def retrieve(self, question: str, top_k=None, similarity_threshold=None):
+    def retrieve(self, question: str, top_k=None, similarity_threshold=None, **kwargs):
         self.last_question = question
         self.last_top_k = top_k
         self.last_similarity_threshold = similarity_threshold
+        self.last_kwargs = kwargs
         return self.results
 
 
 class FakeLLM:
-    def __init__(self):
+    def __init__(self, responses=None):
         self.prompts = []
+        self.responses = responses or ["Sinh vi\u00ean c\u1ea7n ho\u00e0n th\u00e0nh 65% t\u00edn ch\u1ec9. [Source 1]"]
 
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
-        return "Sinh vi\u00ean c\u1ea7n ho\u00e0n th\u00e0nh 65% t\u00edn ch\u1ec9. [Source 1]"
+        if len(self.prompts) <= len(self.responses):
+            return self.responses[len(self.prompts) - 1]
+        return self.responses[-1]
+
+    def generate_stream(self, prompt: str):
+        response = self.generate(prompt)
+        midpoint = max(1, len(response) // 2)
+        yield response[:midpoint]
+        yield response[midpoint:]
 
 
 def make_pipeline(retrieved_chunks):
     vector_store = FakeVectorStore()
     llm = FakeLLM()
+    pipeline = RAGPipeline(
+        document_loader=FakeDocumentLoader(),
+        preprocessor=FakePreprocessor(),
+        splitter=FakeSplitter(),
+        embedder=FakeEmbedder(),
+        vector_store=vector_store,
+        retriever=FakeRetriever(retrieved_chunks),
+        llm=llm,
+    )
+    return pipeline, vector_store, llm
+
+
+def make_pipeline_with_llm(retrieved_chunks, llm):
+    vector_store = FakeVectorStore()
     pipeline = RAGPipeline(
         document_loader=FakeDocumentLoader(),
         preprocessor=FakePreprocessor(),
@@ -104,6 +130,24 @@ def test_ingest_document_stores_chunks_and_embeddings() -> None:
     assert embeddings == [[0.1, 0.2]]
 
 
+def test_ingest_document_reports_progress() -> None:
+    pipeline, _, _ = make_pipeline([])
+    progress_events = []
+
+    pipeline.ingest_document(
+        "path.txt",
+        "sample.txt",
+        "doc",
+        progress_callback=lambda message, value: progress_events.append((message, value)),
+    )
+
+    messages = [message for message, _ in progress_events]
+    assert "Loading document text..." in messages
+    assert "Loading embedding model and indexing 1 chunks..." in messages
+    assert "Encoding and indexing chunks 1/1..." in messages
+    assert progress_events[-1] == ("Document indexing complete.", 1.0)
+
+
 def test_answer_question_refuses_without_retrieved_chunks_and_skips_llm() -> None:
     pipeline, _, llm = make_pipeline([])
 
@@ -129,7 +173,7 @@ def test_answer_question_returns_answer_sources_evidence_and_intent() -> None:
         chat_history=[{"role": "user", "content": "Previous question"}],
     )
 
-    assert result["answer"] == "Sinh vi\u00ean c\u1ea7n ho\u00e0n th\u00e0nh 65% t\u00edn ch\u1ec9. [Source 1]"
+    assert result["answer"] == "Sinh vi\u00ean c\u1ea7n ho\u00e0n th\u00e0nh 65% t\u00edn ch\u1ec9. [1]"
     assert result["sources"] == [
         {
             "source_id": 1,
@@ -140,8 +184,55 @@ def test_answer_question_returns_answer_sources_evidence_and_intent() -> None:
     ]
     assert result["retrieved_chunks"] == retrieved
     assert result["intent"] == "qa"
+    assert pipeline.retriever.last_kwargs["auto"] is True
+    assert pipeline.retriever.last_kwargs["intent"] == "qa"
     assert "Context:" in llm.prompts[0]
     assert "Previous question" in llm.prompts[0]
+
+
+def test_answer_question_streams_partial_answer() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_1_chunk_0",
+            "text": "The paper studies minimum wage effects.",
+            "metadata": {"file_name": "paper.pdf", "page": 1},
+            "score": 0.9,
+        }
+    ]
+    pipeline, _, _ = make_pipeline(retrieved)
+    streamed = []
+
+    result = pipeline.answer_question(
+        "What does the paper study?",
+        stream_callback=lambda partial: streamed.append(partial),
+    )
+
+    assert streamed
+    assert result["answer"].endswith("[1]")
+
+
+def test_answer_question_repairs_language_mismatch_for_english_question() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_1_chunk_0",
+            "text": "The paper studies minimum wage effects.",
+            "metadata": {"file_name": "paper.pdf", "page": 1},
+            "score": 0.9,
+        }
+    ]
+    llm = FakeLLM(
+        responses=[
+            "Theo tài liệu, bài báo nghiên cứu lương tối thiểu. [Source 1]",
+            "The paper studies minimum wage effects. [1]",
+        ]
+    )
+    pipeline, _, llm = make_pipeline_with_llm(retrieved, llm)
+
+    result = pipeline.answer_question("What does the paper study?")
+
+    assert result["answer"] == "The paper studies minimum wage effects. [1]"
+    assert len(llm.prompts) == 2
+    assert "Rewrite the answer below in English only" in llm.prompts[1]
 
 
 def test_answer_question_vietnamese_refusal() -> None:

@@ -28,6 +28,19 @@ def test_splitter_skips_empty_documents() -> None:
     assert chunks == []
 
 
+def test_parent_context_is_capped_for_large_sections() -> None:
+    text = "Heading\n\n" + ("long parent context " * 50)
+
+    chunks = TextSplitter(
+        chunk_size=80,
+        chunk_overlap=0,
+        parent_context_max_chars=120,
+    ).split([{"text": text, "metadata": {"file_id": "doc", "page": 1}}])
+
+    assert chunks
+    assert len(chunks[0]["metadata"]["parent_text"]) <= 120
+
+
 def test_splitter_builds_docx_paragraph_chunk_id() -> None:
     documents = [
         {
@@ -57,3 +70,102 @@ def test_overlap_does_not_start_mid_word() -> None:
 
     assert chunk.startswith("support\n\n")
     assert not chunk.startswith("pport")
+
+
+def test_splitter_adds_section_parent_metadata() -> None:
+    documents = [
+        {
+            "text": "Section 1 Overview\n\nCandidates get training.\n\nSection 2 Benefits\n\nCandidates get allowance.",
+            "metadata": {"file_id": "doc", "file_name": "sample.txt", "page": None},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=80, chunk_overlap=0).split(documents)
+
+    assert chunks[0]["metadata"]["section_title"] == "Section 1 Overview"
+    assert chunks[0]["metadata"]["parent_id"] == "section_0"
+    assert "Candidates get training." in chunks[0]["metadata"]["parent_text"]
+    assert chunks[-1]["metadata"]["section_title"] == "Section 2 Benefits"
+
+
+def test_splitter_detects_common_academic_headings() -> None:
+    documents = [
+        {
+            "text": "Introduction\n\nOpening text.\n\nConcluding Remarks\n\nFinal text.",
+            "metadata": {"file_id": "paper", "file_name": "paper.pdf", "page": 40},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=80, chunk_overlap=0).split(documents)
+
+    assert chunks[0]["metadata"]["section_title"] == "Introduction"
+    assert chunks[-1]["metadata"]["section_title"] == "Concluding Remarks"
+
+
+def test_splitter_detects_data_sources_heading() -> None:
+    documents = [
+        {
+            "text": "Data Sources\n\nThe paper uses survey and administrative records.",
+            "metadata": {"file_id": "paper", "file_name": "paper.pdf", "page": 8},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=120, chunk_overlap=0).split(documents)
+
+    assert chunks[0]["metadata"]["section_title"] == "Data Sources"
+
+
+def test_splitter_does_not_treat_numbered_sentences_as_headings() -> None:
+    documents = [
+        {
+            "text": (
+                "Results\n\n"
+                "70. I also show in Table B.2 that estimates are larger for some cities, "
+                "although this relationship is weaker than the formal sector results."
+            ),
+            "metadata": {"file_id": "paper", "file_name": "paper.pdf", "page": 29},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=220, chunk_overlap=0).split(documents)
+
+    assert chunks
+    assert all(
+        "70. I also show" not in chunk["metadata"]["section_title"]
+        for chunk in chunks
+    )
+
+
+def test_splitter_detects_numbered_heading_split_across_lines() -> None:
+    documents = [
+        {
+            "text": "8\nResults\n\nMain results.\n\n9\nConcluding Remarks\n\nFinal text.",
+            "metadata": {"file_id": "paper", "file_name": "paper.pdf", "page": 34},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=80, chunk_overlap=0).split(documents)
+
+    assert chunks[0]["metadata"]["section_title"] == "8 Results"
+    assert chunks[-1]["metadata"]["section_title"] == "9 Concluding Remarks"
+
+
+def test_splitter_detects_heading_without_blank_line_boundaries() -> None:
+    documents = [
+        {
+            "text": (
+                "Previous section final sentence.\n"
+                "9\n"
+                "Concluding Remarks\n"
+                "This paper studies minimum wage effects in Colombia.\n"
+                "The final section discusses wages and employment."
+            ),
+            "metadata": {"file_id": "paper", "file_name": "paper.pdf", "page": 34},
+        }
+    ]
+
+    chunks = TextSplitter(chunk_size=180, chunk_overlap=0).split(documents)
+
+    assert chunks[0]["metadata"]["section_title"] == "Document"
+    assert chunks[-1]["metadata"]["section_title"] == "9 Concluding Remarks"
+    assert "minimum wage effects" in chunks[-1]["metadata"]["parent_text"]

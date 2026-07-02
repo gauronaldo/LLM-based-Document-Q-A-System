@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+import time
 from pathlib import Path
 from typing import Any
+
+from app.processing_debug import log_event, text_stats
 
 
 class VectorStoreError(Exception):
@@ -14,9 +17,20 @@ class VectorStoreError(Exception):
 class VectorStore:
     """Store and search document chunks in a persistent ChromaDB collection."""
 
-    def __init__(self, persist_directory: str | Path, collection_name: str):
+    DEFAULT_UPSERT_BATCH_SIZE = 512
+
+    def __init__(
+        self,
+        persist_directory: str | Path,
+        collection_name: str,
+        upsert_batch_size: int = DEFAULT_UPSERT_BATCH_SIZE,
+    ):
+        if upsert_batch_size <= 0:
+            raise ValueError("upsert_batch_size must be greater than 0.")
+
         self.persist_directory = Path(persist_directory)
         self.collection_name = collection_name
+        self.upsert_batch_size = upsert_batch_size
         self._client: Any | None = None
         self._collection: Any | None = None
 
@@ -28,19 +42,43 @@ class VectorStore:
         if not chunks:
             return
 
-        ids = [chunk["chunk_id"] for chunk in chunks]
-        documents = [chunk["text"] for chunk in chunks]
-        metadatas = [self._clean_metadata(chunk.get("metadata", {})) for chunk in chunks]
+        for batch_start in range(0, len(chunks), self.upsert_batch_size):
+            batch_chunks = chunks[batch_start : batch_start + self.upsert_batch_size]
+            batch_embeddings = embeddings[batch_start : batch_start + self.upsert_batch_size]
 
-        try:
-            self.collection.upsert(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
-        except Exception as exc:
-            raise VectorStoreError(f"Failed to add chunks to vector store: {exc}") from exc
+            ids = [chunk["chunk_id"] for chunk in batch_chunks]
+            documents = [chunk["text"] for chunk in batch_chunks]
+            metadatas = [self._clean_metadata(chunk.get("metadata", {})) for chunk in batch_chunks]
+
+            try:
+                started = time.perf_counter()
+                log_event(
+                    "chroma_upsert_start",
+                    collection=self.collection_name,
+                    ids=len(ids),
+                    embeddings=len(batch_embeddings),
+                    **text_stats(documents),
+                )
+                self.collection.upsert(
+                    ids=ids,
+                    documents=documents,
+                    embeddings=batch_embeddings,
+                    metadatas=metadatas,
+                )
+                log_event(
+                    "chroma_upsert_done",
+                    collection=self.collection_name,
+                    ids=len(ids),
+                    elapsed_seconds=round(time.perf_counter() - started, 3),
+                )
+            except Exception as exc:
+                log_event(
+                    "chroma_upsert_error",
+                    collection=self.collection_name,
+                    ids=len(ids),
+                    error=repr(exc),
+                )
+                raise VectorStoreError(f"Failed to add chunks to vector store: {exc}") from exc
 
     def search(self, query_embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         """Search for the most relevant chunks for a query embedding."""
@@ -77,6 +115,31 @@ class VectorStore:
             )
 
         return retrieved
+
+    def get_all(self) -> list[dict[str, Any]]:
+        """Return all stored chunks for keyword/hybrid retrieval."""
+
+        try:
+            results = self.collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read vector store documents: {exc}") from exc
+
+        ids = results.get("ids", [])
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+
+        chunks = []
+        for chunk_id, text, metadata in zip(ids, documents, metadatas):
+            chunks.append(
+                {
+                    "chunk_id": chunk_id,
+                    "text": text,
+                    "metadata": metadata or {},
+                    "score": 0.0,
+                }
+            )
+
+        return chunks
 
     def reset(self) -> None:
         """Delete and recreate the collection."""
