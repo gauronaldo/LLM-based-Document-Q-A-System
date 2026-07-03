@@ -78,3 +78,7 @@ def test_local_hash_embedding_is_deterministic_and_does_not_load_model(monkeypat
     assert first == second
     assert len(first) == 384
     assert any(value != 0.0 for value in first)
+def test_embedding_model_aliases_bge_m3() -> None:
+    embedder = EmbeddingModel("bge-m3")
+
+    assert embedder.model_name == "BAAI/bge-m3"

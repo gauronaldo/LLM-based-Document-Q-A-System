@@ -78,7 +78,13 @@ class AppConfig:
     hybrid_alpha: float = float(os.getenv("HYBRID_ALPHA", "0.7"))
     use_hybrid_search: bool = _env_bool("USE_HYBRID_SEARCH", True)
     use_mmr: bool = _env_bool("USE_MMR", True)
+    use_multi_query: bool = _env_bool("USE_MULTI_QUERY", False)
+    multi_query_count: int = _env_int("MULTI_QUERY_COUNT", 4)
     reranker_model: str | None = _env_optional_string("RERANKER_MODEL")
+    document_profile: str = os.getenv(
+        "DOCUMENT_PROFILE",
+        os.getenv("QUERY_PROFILE", "general"),
+    ).strip().lower()
     raw_data_dir: Path = Path(os.getenv("RAW_DATA_DIR", "data/raw"))
     processed_data_dir: Path = Path(os.getenv("PROCESSED_DATA_DIR", "data/processed"))
 

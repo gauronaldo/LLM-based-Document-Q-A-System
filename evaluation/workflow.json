@@ -1,0 +1,70 @@
+{
+  "workflow": [
+    {
+      "stage": "dev",
+      "purpose": "Tune chunking, retrieval, reranker, prompt, and citation behavior.",
+      "documents": ["PerezPerez2020.pdf"],
+      "questions": "evaluation/questions.csv",
+      "allowed_actions": [
+        "inspect retrieval misses",
+        "run retrieval ablations",
+        "adjust general RAG components",
+        "adjust profile config"
+      ],
+      "not_allowed_actions": [
+        "hardcode benchmark questions",
+        "copy expected answers into prompts",
+        "modify holdout results after seeing metrics"
+      ]
+    },
+    {
+      "stage": "freeze_config",
+      "purpose": "Record the selected model, retrieval, reranker, prompt, and citation settings before final testing.",
+      "output": "evaluation/results/frozen_config.json"
+    },
+    {
+      "stage": "holdout",
+      "purpose": "Run custom eval and RAGAS after config is frozen.",
+      "documents": ["w18347.pdf"],
+      "questions": "evaluation/questions_w18347.csv",
+      "report_role": "behavior/retrieval holdout validation"
+    },
+    {
+      "stage": "final_ragas",
+      "purpose": "Run final custom eval and RAGAS on a separate paper without tuning on it.",
+      "documents": ["2302.06590v1.pdf"],
+      "questions": "evaluation/questions_2302_06590.csv",
+      "report_role": "final RAGAS report candidate and cross-document generalization check"
+    },
+    {
+      "stage": "report",
+      "purpose": "Report profile, document, question set, metric definitions, and whether results are dev or holdout."
+    }
+  ],
+  "default_profile": "academic",
+  "metric_groups": {
+    "retrieval_debug": [
+      "page_recall_at_5",
+      "evidence_hit_at_5",
+      "mrr",
+      "citation_page_accuracy",
+      "average_retrieval_latency_seconds"
+    ],
+    "custom_eval": [
+      "keyword_recall_at_5",
+      "page_recall_at_5",
+      "mrr",
+      "citation_strict_accuracy",
+      "citation_page_accuracy",
+      "refusal_accuracy",
+      "expected_behavior_accuracy",
+      "latency_seconds"
+    ],
+    "ragas": [
+      "context_precision",
+      "context_recall",
+      "answer_relevancy",
+      "faithfulness"
+    ]
+  }
+}

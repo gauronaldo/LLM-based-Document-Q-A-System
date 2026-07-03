@@ -5,6 +5,9 @@ from evaluation.evaluate import (
     _default_huggingface_embedding_model,
     _default_ragas_embedding_provider,
     _missing_framework_message,
+    _looks_like_refusal,
+    _looks_like_unsupported_claim_answer,
+    _keyword_matches,
     _normalize_ragas_provider,
     _ragas_judge_max_tokens,
     _ragas_llm_factory_provider,
@@ -53,6 +56,8 @@ def test_summarize_core_results_reports_required_metrics() -> None:
             sources=[],
             citation_accuracy=None,
             refusal_accuracy=1.0,
+            expected_behavior="refuse",
+            expected_behavior_accuracy=1.0,
             metric_errors={},
         ),
     ]
@@ -65,7 +70,56 @@ def test_summarize_core_results_reports_required_metrics() -> None:
     assert summary["faithfulness"] == 0.6
     assert summary["citation_accuracy"] == 1.0
     assert summary["refusal_accuracy"] == 1.0
+    assert summary["expected_behavior_accuracy"] == 1.0
     assert summary["average_latency_seconds"] == 3.0
+
+
+def test_summarize_core_results_excludes_behavior_only_rows_from_ragas_average() -> None:
+    results = [
+        CoreEvalResult(
+            question="Answerable?",
+            difficulty="easy",
+            is_answerable=True,
+            expected_answer="Expected",
+            answer="Answer [1]",
+            status="success",
+            error="",
+            attempts=1,
+            latency_seconds=1.0,
+            retrieved_contexts=["Context"],
+            retrieved_sources=[],
+            sources=[],
+            question_type="answerable",
+            context_precision=0.8,
+            citation_accuracy=1.0,
+            metric_errors={},
+        ),
+        CoreEvalResult(
+            question="Unsupported?",
+            difficulty="medium",
+            is_answerable=False,
+            expected_answer="The document does not support this claim.",
+            answer="The document does not support this claim. [1]",
+            status="success",
+            error="",
+            attempts=1,
+            latency_seconds=1.0,
+            retrieved_contexts=["Context"],
+            retrieved_sources=[],
+            sources=[],
+            question_type="unsupported_claim",
+            expected_behavior="state_not_supported",
+            context_precision=0.0,
+            unsupported_claim_accuracy=1.0,
+            expected_behavior_accuracy=1.0,
+            metric_errors={},
+        ),
+    ]
+
+    summary = summarize_core_results(results)
+
+    assert summary["context_precision"] == 0.8
+    assert summary["unsupported_claim_accuracy"] == 1.0
 
 
 def test_summarize_core_results_reports_missing_metric_as_none() -> None:
@@ -90,6 +144,23 @@ def test_summarize_core_results_reports_missing_metric_as_none() -> None:
     summary = summarize_core_results([result])
 
     assert summary["refusal_accuracy"] is None
+
+
+def test_looks_like_refusal_accepts_negative_no_info_answers() -> None:
+    assert _looks_like_refusal("No, the document does not address cryptocurrency markets. [1]")
+    assert _looks_like_refusal("No. I did not find this information in the provided document.")
+    assert _looks_like_refusal("I couldn't find this information in the provided document. [1]")
+    assert not _looks_like_refusal(
+        "No, the paper does not find evidence of formal-to-informal spillovers. [1]"
+    )
+
+
+def test_looks_like_unsupported_claim_accepts_clear_not_supported_phrase() -> None:
+    assert _looks_like_unsupported_claim_answer("The document does not support this claim.")
+
+
+def test_keyword_matches_handles_compact_quarter_tokens() -> None:
+    assert _keyword_matches("1996q2", "The survey starts in 1996 q2 and runs to 2000 q2.")
 
 
 def test_write_core_results_and_report(tmp_path: Path) -> None:
@@ -128,6 +199,7 @@ def test_write_core_results_and_report(tmp_path: Path) -> None:
     assert "difficulty" in csv_content
     assert "Core RAG Evaluation Results" in report_content
     assert "Framework: `ragas`" in report_content
+    assert "RAGAS-scored questions: 1" in report_content
     assert "Medium questions: 1" in report_content
     assert "Context Precision: 80.0%" in report_content
     assert "Average Latency: 1.25s" in report_content

@@ -1,6 +1,14 @@
 import pytest
 
-from app.retriever import Retriever, RetrieverError
+from app.query_profiles import QueryProfile
+from app.retriever import (
+    Retriever,
+    RetrieverError,
+    _content_terms,
+    _query_entity_phrases,
+    _query_variants,
+    _reciprocal_rank_fusion,
+)
 
 
 class FakeEmbedder:
@@ -49,6 +57,22 @@ class FakeReranker:
     def rerank(self, query, candidates, top_k):
         self.calls.append((query, candidates, top_k))
         return candidates[:top_k]
+
+
+def test_entity_extraction_ignores_english_question_starters() -> None:
+    assert _query_entity_phrases("What AI tool is evaluated in the experiment?") == []
+    assert _query_entity_phrases(
+        "Does Figure 6 support the claim that treated participants completed the task faster?"
+    ) == []
+    assert _query_entity_phrases(
+        "Does the paper say GitHub Copilot is powered by OpenAI Codex?"
+    ) == ["GitHub Copilot", "OpenAI Codex"]
+
+
+def test_content_terms_keep_ai_as_meaningful_domain_term() -> None:
+    terms = _content_terms("What AI tool is evaluated in the experiment?")
+
+    assert "ai" in terms
 
 
 def test_retrieve_encodes_question_and_filters_by_threshold() -> None:
@@ -221,6 +245,100 @@ def test_retrieval_handles_singular_plural_and_vietnamese_question_words() -> No
     results = retriever.retrieve("data source tới từ đâu?")
 
     assert [result["chunk_id"] for result in results] == ["data-sources"]
+
+
+def test_result_question_prefers_result_section_over_background_literature() -> None:
+    vector_store = FakeHybridVectorStore(
+        results=[
+            {
+                "chunk_id": "literature",
+                "text": "Prior literature finds mixed effects in informal labor markets.",
+                "score": 0.55,
+                "metadata": {"section_title": "Related Literature"},
+            }
+        ],
+        all_chunks=[
+            {
+                "chunk_id": "literature",
+                "text": "Prior literature finds mixed effects in informal labor markets.",
+                "metadata": {"section_title": "Related Literature"},
+            },
+            {
+                "chunk_id": "informal-results",
+                "text": "Informal wages rise around the minimum wage, with smaller effects than formal wages.",
+                "metadata": {"section_title": "Results"},
+            },
+        ],
+    )
+    profile = QueryProfile(
+        name="test",
+        query_expansions={},
+        section_intents={
+            "result": {
+                "query_terms": ("find", "result"),
+                "section_terms": ("result",),
+            }
+        },
+    )
+    retriever = Retriever(
+        vector_store,
+        FakeEmbedder(),
+        top_k=1,
+        similarity_threshold=0.3,
+        query_profile=profile,
+    )
+
+    results = retriever.retrieve("What does the paper find for informal wages?")
+
+    assert [result["chunk_id"] for result in results] == ["informal-results"]
+
+
+def test_profile_evidence_boost_prefers_result_evidence_over_broad_background() -> None:
+    vector_store = FakeHybridVectorStore(
+        results=[
+            {
+                "chunk_id": "background",
+                "text": "The paper discusses wage distribution and labor markets broadly.",
+                "score": 0.62,
+                "metadata": {"section_title": "Introduction"},
+            },
+            {
+                "chunk_id": "result",
+                "text": "The results show wage effects and estimates for the studied outcome.",
+                "score": 0.5,
+                "metadata": {"section_title": "Results"},
+            },
+        ],
+        all_chunks=[],
+    )
+    profile = QueryProfile(
+        name="test",
+        query_expansions={},
+        scoring_weights={
+            "section_boost_weight": 0.08,
+            "phrase_match_boost_weight": 0.15,
+            "exact_phrase_boost_weight": 0.2,
+        },
+        retrieval_intents={
+            "result_finding": {
+                "query_terms": ("find", "outcome"),
+                "section_terms": ("result",),
+                "phrase_terms": ("result", "effect", "estimate", "outcome"),
+            }
+        },
+    )
+    retriever = Retriever(
+        vector_store,
+        FakeEmbedder(),
+        top_k=1,
+        similarity_threshold=0.0,
+        use_hybrid_search=False,
+        query_profile=profile,
+    )
+
+    results = retriever.retrieve("What outcomes does the paper find?")
+
+    assert [result["chunk_id"] for result in results] == ["result"]
 
 
 def test_entity_aware_retrieval_prefers_exact_luu_bi_over_luu_bieu() -> None:
@@ -457,6 +575,95 @@ def test_mmr_preserves_top_reranked_candidate() -> None:
 
     assert selected[0]["chunk_id"] == "best"
     assert len(selected) == 2
+
+
+def test_mmr_is_reserved_for_diverse_intents() -> None:
+    retriever = Retriever(FakeVectorStore(), FakeEmbedder(), top_k=5, use_mmr=True)
+
+    assert retriever._should_use_mmr("What is the sample period?", "qa", 5) is False
+    assert retriever._should_use_mmr("Explain the sample period", "explanation", 7) is False
+    assert retriever._should_use_mmr("Summarize the document", "summary", 10) is True
+    assert retriever._should_use_mmr("Compare formal and informal wages", "comparison", 7) is True
+
+
+def test_query_variants_use_related_retrieval_terms() -> None:
+    variants = _query_variants(
+        "What is the method?\nRelated retrieval terms: approach, methodology, process",
+        max_variants=4,
+    )
+
+    assert variants[0].startswith("What is the method?")
+    assert "What is the method? approach" in variants
+    assert len(variants) == 4
+
+
+def test_retrieve_uses_retrieval_query_for_evidence_guard_with_expanded_query() -> None:
+    vector_store = FakeVectorStore(
+        results=[
+            {
+                "chunk_id": "data",
+                "text": "The data source is the household survey.",
+                "score": 0.6,
+                "metadata": {},
+            }
+        ]
+    )
+    retriever = Retriever(vector_store, FakeEmbedder(), top_k=1, similarity_threshold=0.0)
+
+    results = retriever.retrieve(
+        "Where is the data source?\nRelated retrieval terms: dataset, sample, administrative records",
+        original_question="Where is the data source?",
+    )
+
+    assert [result["chunk_id"] for result in results] == ["data"]
+
+
+def test_retrieve_uses_rewritten_claim_query_for_evidence_guard() -> None:
+    vector_store = FakeVectorStore(
+        results=[
+            {
+                "chunk_id": "claim",
+                "text": "GitHub Copilot is powered by OpenAI Codex.",
+                "score": 0.6,
+                "metadata": {},
+            }
+        ]
+    )
+    retriever = Retriever(vector_store, FakeEmbedder(), top_k=1, similarity_threshold=0.0)
+
+    results = retriever.retrieve(
+        "GitHub Copilot is powered by OpenAI Codex",
+        original_question="Does the paper say GitHub Copilot is powered by OpenAI Codex?",
+    )
+
+    assert [result["chunk_id"] for result in results] == ["claim"]
+
+
+def test_reciprocal_rank_fusion_promotes_repeated_results() -> None:
+    fused = _reciprocal_rank_fusion(
+        [
+            [{"chunk_id": "a", "score": 0.4}, {"chunk_id": "b", "score": 0.9}],
+            [{"chunk_id": "a", "score": 0.3}, {"chunk_id": "c", "score": 0.8}],
+        ],
+        top_k=2,
+    )
+
+    assert fused[0]["chunk_id"] == "a"
+    assert fused[0]["rrf_score"] > fused[1]["rrf_score"]
+
+
+def test_reciprocal_rank_fusion_does_not_turn_rank_agreement_into_full_confidence() -> None:
+    fused = _reciprocal_rank_fusion(
+        [
+            [{"chunk_id": "a", "score": 0.2}],
+            [{"chunk_id": "a", "score": 0.2}],
+        ],
+        top_k=1,
+    )
+
+    assert fused[0]["base_score"] == 0.2
+    assert fused[0]["rank_score"] == 1.0
+    assert fused[0]["score"] < 0.4
 
 
 def test_retrieve_returns_empty_for_blank_question() -> None:

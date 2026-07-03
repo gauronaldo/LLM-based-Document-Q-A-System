@@ -88,7 +88,8 @@ def test_splitter_adds_section_parent_metadata() -> None:
     assert chunks[-1]["metadata"]["section_title"] == "Section 2 Benefits"
 
 
-def test_splitter_detects_common_academic_headings() -> None:
+def test_splitter_detects_common_academic_headings(monkeypatch) -> None:
+    monkeypatch.setenv("DOCUMENT_PROFILE", "academic")
     documents = [
         {
             "text": "Introduction\n\nOpening text.\n\nConcluding Remarks\n\nFinal text.",

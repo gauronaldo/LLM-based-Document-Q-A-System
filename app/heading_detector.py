@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from app.query_profiles import load_query_profile
+
 
 EXPLICIT_HEADING_PATTERN = re.compile(
     r"^(?:"
@@ -12,28 +14,6 @@ EXPLICIT_HEADING_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
-
-COMMON_SECTION_HEADINGS = {
-    "abstract",
-    "acknowledgements",
-    "acknowledgments",
-    "appendix",
-    "background",
-    "conclusion",
-    "conclusions",
-    "concluding remarks",
-    "data",
-    "data source",
-    "data sources",
-    "discussion",
-    "empirical strategy",
-    "introduction",
-    "literature review",
-    "methodology",
-    "methods",
-    "references",
-    "results",
-}
 
 TITLE_CONNECTORS = {"and", "or", "of", "the", "for", "to", "in", "on", "with", "a", "an"}
 
@@ -49,7 +29,7 @@ def line_looks_like_heading(line: str) -> bool:
         return True
 
     normalized = strip_numbering(line).lower()
-    if normalized in COMMON_SECTION_HEADINGS:
+    if normalized in _configured_heading_terms():
         return True
     if line.isupper() and len(line.split()) <= 12:
         return True
@@ -72,7 +52,7 @@ def _numbered_heading_looks_like_title(line: str) -> bool:
 def _title_fragment_looks_like_heading(title: str) -> bool:
     title = title.strip()
     normalized = title.lower()
-    if normalized in COMMON_SECTION_HEADINGS:
+    if normalized in _configured_heading_terms():
         return True
     if len(title) > 80 or re.search(r"[,;:!?]", title):
         return False
@@ -89,3 +69,7 @@ def _title_fragment_looks_like_heading(title: str) -> bool:
             title_like_words += 1
 
     return title_like_words / len(words) >= 0.65
+
+
+def _configured_heading_terms() -> set[str]:
+    return {term.lower() for term in load_query_profile().heading_terms}

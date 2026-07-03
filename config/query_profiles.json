@@ -1,0 +1,163 @@
+{
+  "general": {
+    "description": "General-purpose document chatbot profile.",
+    "prompt_extension": "Treat headings, section titles, tables, bullets, and nearby paragraphs as document structure. If the user asks about a section-like concept, use the relevant section when it is present.",
+    "heading_terms": [
+      "appendix",
+      "background",
+      "conclusion",
+      "conclusions",
+      "data",
+      "data source",
+      "data sources",
+      "discussion",
+      "introduction",
+      "methodology",
+      "methods",
+      "overview",
+      "references",
+      "requirements",
+      "results",
+      "summary"
+    ],
+    "query_expansions": {
+      "approach": ["method", "methodology", "process"],
+      "caveat": ["limitation", "constraint", "scope"],
+      "caveats": ["limitations", "constraints", "scope"],
+      "conclusion": ["concluding remarks", "summary", "final remarks"],
+      "data": ["source", "sources", "dataset", "sample"],
+      "find": ["result", "finding", "effect", "estimate"],
+      "finds": ["results", "findings", "effects", "estimates"],
+      "method": ["approach", "methodology", "process"],
+      "methods": ["approach", "methodology", "process"],
+      "policy": ["intervention", "rule", "regulation", "change"],
+      "requirement": ["condition", "criteria", "eligibility"],
+      "requirements": ["conditions", "criteria", "eligibility"],
+      "response": ["effect", "change", "result"],
+      "responses": ["effects", "changes", "results"],
+      "result": ["finding", "outcome", "conclusion"],
+      "results": ["findings", "outcomes", "conclusions"],
+      "source": ["data", "origin", "reference"],
+      "sources": ["data", "origins", "references"],
+      "summary": ["overview", "key points", "conclusion"],
+      "validity": ["robustness", "check", "evidence"],
+      "welfare": ["well-being", "benefit", "cost"]
+    },
+    "section_intents": {
+      "conclusion": {
+        "query_terms": ["conclude", "concludes", "conclusion", "summary", "summarize", "takeaway", "takeaways"],
+        "section_terms": ["concluding", "conclusion", "conclusions", "summary", "takeaway", "takeaways", "final"]
+      },
+      "data": {
+        "query_terms": ["data", "dataset", "datasets", "source", "sources", "sample"],
+        "section_terms": ["data", "dataset", "datasets", "source", "sources", "sample"]
+      },
+      "method": {
+        "query_terms": ["approach", "method", "methods", "methodology", "process", "procedure"],
+        "section_terms": ["approach", "method", "methods", "methodology", "process", "procedure"]
+      },
+      "result": {
+        "query_terms": ["effect", "effects", "finding", "findings", "outcome", "outcomes", "result", "results", "show", "shows"],
+        "section_terms": ["finding", "findings", "outcome", "outcomes", "result", "results"]
+      },
+      "limitation": {
+        "query_terms": ["caveat", "caveats", "constraint", "constraints", "limitation", "limitations", "scope"],
+        "section_terms": ["caveat", "caveats", "constraint", "constraints", "limitation", "limitations", "scope"]
+      }
+    },
+    "scoring_weights": {
+      "section_boost_weight": 0.08,
+      "phrase_match_boost_weight": 0.15,
+      "exact_phrase_boost_weight": 0.20
+    },
+    "retrieval_intents": {
+      "result_finding": {
+        "query_terms": ["conclude", "concludes", "effect", "effects", "estimate", "estimates", "find", "finding", "findings", "outcome", "outcomes", "report", "reports", "result", "results", "response", "show", "shows"],
+        "section_terms": ["abstract", "conclusion", "concluding", "discussion", "empirical", "finding", "findings", "result", "results"],
+        "phrase_terms": ["decrease", "effect", "effects", "estimate", "estimates", "finding", "findings", "increase", "impact", "outcome", "outcomes", "response", "result", "results"]
+      },
+      "measurement_or_definition": {
+        "query_terms": ["based", "construct", "constructed", "define", "defined", "definition", "incidence", "information", "measure", "measured", "measurement", "variation"],
+        "section_terms": ["data", "definition", "empirical", "identification", "measure", "measurement", "method", "methodology", "research", "strategy", "variable", "variables"],
+        "phrase_terms": ["based on", "before and after", "constructed", "defined as", "definition", "fraction affected", "incidence", "measure", "measured", "old and new", "variation"]
+      },
+      "method_or_identification": {
+        "query_terms": ["approach", "design", "empirical", "estimate", "identification", "method", "methodology", "model", "regression", "shock", "strategy"],
+        "section_terms": ["abstract", "data", "design", "empirical", "estimation", "identification", "introduction", "method", "methodology", "research", "strategy"],
+        "phrase_terms": ["approach", "difference in differences", "diff in diff", "identification", "model", "research design", "rif", "shock", "source of variation", "strategy", "unconditional quantile regression"]
+      },
+      "limitation_or_caveat": {
+        "query_terms": ["applicability", "caveat", "caveats", "external", "generalization", "generalize", "limitation", "limitations", "validity", "warn"],
+        "section_terms": ["abstract", "caveat", "conclusion", "concluding", "discussion", "limitation", "limitations"],
+        "phrase_terms": ["caveat", "context", "different settings", "external validity", "generalize", "larger changes", "limitation", "limitations", "may not apply", "may not hold"]
+      },
+      "claim_verification": {
+        "query_terms": ["claim", "conclude", "does", "evidence", "support", "supports"],
+        "section_terms": ["abstract", "conclusion", "concluding", "discussion", "empirical", "result", "results"],
+        "phrase_terms": ["claim", "conclude", "does not support", "evidence", "find", "no significant effects", "not driven by", "suggest", "support"]
+      }
+    }
+  },
+  "academic": {
+    "extends": "general",
+    "description": "Optional profile for research papers and academic PDFs.",
+    "prompt_extension": "For academic papers, distinguish the research question, data, identification or method, findings, robustness, limitations, and conclusion when those sections are available.",
+    "heading_terms": [
+      "abstract",
+      "acknowledgements",
+      "acknowledgments",
+      "concluding remarks",
+      "empirical strategy",
+      "literature review",
+      "robustness"
+    ],
+    "query_expansions": {
+      "identification": ["research design", "empirical strategy"],
+      "setting": ["context", "institutional background", "country characteristics"],
+      "shock": ["variation", "event", "change"],
+      "robustness": ["sensitivity", "checks"],
+      "simulation": ["counterfactual", "policy analysis"],
+      "simulations": ["counterfactuals", "policy analysis"],
+      "empirical": ["research", "statistical"],
+      "econometric": ["statistical", "regression"],
+      "paper": ["article", "study"]
+    },
+    "section_intents": {
+      "method": {
+        "query_terms": ["approach", "design", "empirical", "identification", "method", "methodology", "regression", "strategy"],
+        "section_terms": ["approach", "design", "empirical", "identification", "method", "methodology", "strategy"]
+      },
+      "limitation": {
+        "query_terms": ["applicability", "caveat", "caveats", "external validity", "generalize", "limitation", "limitations"],
+        "section_terms": ["caveat", "caveats", "concluding", "conclusion", "limitations"]
+      }
+    },
+    "retrieval_intents": {
+      "result_finding": {
+        "query_terms": ["conclude", "concludes", "effect", "effects", "estimate", "estimates", "find", "finding", "findings", "outcome", "outcomes", "report", "reports", "result", "results", "response", "show", "shows"],
+        "section_terms": ["abstract", "conclusion", "concluding", "discussion", "empirical", "finding", "findings", "result", "results"],
+        "phrase_terms": ["decrease", "effect", "effects", "estimate", "estimates", "finding", "findings", "increase", "impact", "outcome", "outcomes", "response", "result", "results"]
+      },
+      "measurement_or_definition": {
+        "query_terms": ["based", "construct", "constructed", "define", "defined", "definition", "incidence", "information", "measure", "measured", "measurement", "variation"],
+        "section_terms": ["data", "definition", "empirical", "identification", "measure", "measurement", "method", "methodology", "research", "strategy", "variable", "variables"],
+        "phrase_terms": ["based on", "before and after", "constructed", "defined as", "definition", "fraction affected", "incidence", "measure", "measured", "old and new", "variation"]
+      },
+      "method_or_identification": {
+        "query_terms": ["approach", "design", "empirical", "estimate", "identification", "method", "methodology", "model", "regression", "shock", "strategy"],
+        "section_terms": ["abstract", "data", "design", "empirical", "estimation", "identification", "introduction", "method", "methodology", "research", "strategy"],
+        "phrase_terms": ["approach", "difference in differences", "diff in diff", "identification", "model", "research design", "rif", "shock", "source of variation", "strategy", "unconditional quantile regression"]
+      },
+      "limitation_or_caveat": {
+        "query_terms": ["applicability", "caveat", "caveats", "external", "generalization", "generalize", "limitation", "limitations", "validity", "warn"],
+        "section_terms": ["abstract", "caveat", "conclusion", "concluding", "discussion", "limitation", "limitations"],
+        "phrase_terms": ["caveat", "context", "different settings", "external validity", "generalize", "larger changes", "limitation", "limitations", "may not apply", "may not hold"]
+      },
+      "claim_verification": {
+        "query_terms": ["claim", "conclude", "does", "evidence", "support", "supports"],
+        "section_terms": ["abstract", "conclusion", "concluding", "discussion", "empirical", "result", "results"],
+        "phrase_terms": ["claim", "conclude", "does not support", "evidence", "find", "no significant effects", "not driven by", "suggest", "support"]
+      }
+    }
+  }
+}

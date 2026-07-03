@@ -37,6 +37,8 @@ CORE_METRICS = (
     "average_latency_seconds",
 )
 
+RAGAS_QUESTION_TYPES = {"answerable", "reasoning", "claim_verification"}
+
 
 @dataclass(frozen=True)
 class EvaluationQuestion:
@@ -49,6 +51,8 @@ class EvaluationQuestion:
     source_pages: tuple[int, ...]
     expected_keywords: tuple[str, ...]
     is_answerable: bool
+    question_type: str = "answerable"
+    expected_behavior: str = "answer"
 
 
 @dataclass(frozen=True)
@@ -67,12 +71,16 @@ class CoreEvalResult:
     retrieved_contexts: list[str]
     retrieved_sources: list[dict[str, Any]]
     sources: list[dict[str, Any]]
+    question_type: str = "answerable"
+    expected_behavior: str = "answer"
     context_precision: float | None = None
     context_recall: float | None = None
     answer_relevancy: float | None = None
     faithfulness: float | None = None
     citation_accuracy: float | None = None
     refusal_accuracy: float | None = None
+    unsupported_claim_accuracy: float | None = None
+    expected_behavior_accuracy: float | None = None
     metric_errors: dict[str, str] | None = None
 
 
@@ -92,6 +100,8 @@ def load_questions(path: Path) -> list[EvaluationQuestion]:
                     source_pages=_parse_pages(row),
                     expected_keywords=_parse_keywords(row.get("expected_keywords", "")),
                     is_answerable=_parse_bool(row["is_answerable"]),
+                    question_type=_default_question_type(row),
+                    expected_behavior=_default_expected_behavior(row),
                 )
             )
     return questions
@@ -208,6 +218,8 @@ def write_core_results(results: list[CoreEvalResult], output_path: Path) -> None
             fieldnames=[
                 "question",
                 "difficulty",
+                "question_type",
+                "expected_behavior",
                 "is_answerable",
                 "expected_answer",
                 "answer",
@@ -221,6 +233,8 @@ def write_core_results(results: list[CoreEvalResult], output_path: Path) -> None
                 "faithfulness",
                 "citation_accuracy",
                 "refusal_accuracy",
+                "unsupported_claim_accuracy",
+                "expected_behavior_accuracy",
                 "metric_errors_json",
                 "retrieved_sources_json",
                 "retrieved_contexts_json",
@@ -233,6 +247,8 @@ def write_core_results(results: list[CoreEvalResult], output_path: Path) -> None
                 {
                     "question": result.question,
                     "difficulty": result.difficulty,
+                    "question_type": result.question_type,
+                    "expected_behavior": result.expected_behavior,
                     "is_answerable": result.is_answerable,
                     "expected_answer": result.expected_answer,
                     "answer": result.answer,
@@ -246,6 +262,8 @@ def write_core_results(results: list[CoreEvalResult], output_path: Path) -> None
                     "faithfulness": _optional_score(result.faithfulness),
                     "citation_accuracy": _optional_score(result.citation_accuracy),
                     "refusal_accuracy": _optional_score(result.refusal_accuracy),
+                    "unsupported_claim_accuracy": _optional_score(result.unsupported_claim_accuracy),
+                    "expected_behavior_accuracy": _optional_score(result.expected_behavior_accuracy),
                     "metric_errors_json": json.dumps(result.metric_errors or {}, ensure_ascii=False),
                     "retrieved_sources_json": json.dumps(result.retrieved_sources, ensure_ascii=False),
                     "retrieved_contexts_json": json.dumps(result.retrieved_contexts, ensure_ascii=False),
@@ -268,6 +286,8 @@ def write_core_report(
         "Framework: `ragas`",
         f"Judge model: `{judge_model}`",
         f"Total questions: {len(results)}",
+        f"RAGAS-scored questions: {len(_ragas_metric_results(results))}",
+        f"Behavior-only questions: {len(_behavior_metric_results(results))}",
         f"Successful generations: {sum(1 for result in results if result.status == 'success')}",
         f"Answerable questions: {sum(1 for result in results if result.is_answerable)}",
         f"Unanswerable questions: {sum(1 for result in results if not result.is_answerable)}",
@@ -275,28 +295,38 @@ def write_core_report(
         f"Medium questions: {sum(1 for result in results if result.difficulty == 'medium')}",
         f"Hard questions: {sum(1 for result in results if result.difficulty == 'hard')}",
         "",
-        "## Core Metrics",
+        "## RAGAS Metrics",
+        "",
+        "Computed only on answerable, reasoning, and supported claim-verification questions with clear ground truth. Out-of-scope and unsupported-claim rows are excluded from these averages.",
         "",
         f"- Context Precision: {_format_percent(summary['context_precision'])}",
         f"- Context Recall: {_format_percent(summary['context_recall'])}",
         f"- Answer Relevancy: {_format_percent(summary['answer_relevancy'])}",
         f"- Faithfulness: {_format_percent(summary['faithfulness'])}",
         f"- Citation Accuracy: {_format_percent(summary['citation_accuracy'])}",
+        "",
+        "## Behavior Metrics",
+        "",
+        "Computed on rows where the expected behavior is refusal or unsupported-claim handling.",
         f"- Refusal Accuracy: {_format_percent(summary['refusal_accuracy'])}",
+        f"- Unsupported Claim Accuracy: {_format_percent(summary['unsupported_claim_accuracy'])}",
+        f"- Expected Behavior Accuracy: {_format_percent(summary['expected_behavior_accuracy'])}",
         f"- Average Latency: {summary['average_latency_seconds']:.2f}s",
         "",
         "## Per-question Results",
         "",
-        "| # | Difficulty | Type | Latency | CtxPrec | CtxRecall | AnsRel | Faith | Cite | Refusal | Error | Question | Answer |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+        "| # | Difficulty | Type | Behavior | RAGAS? | Latency | CtxPrec | CtxRecall | AnsRel | Faith | Cite | Refusal | Unsupported | BehaviorOK | Error | Question | Answer |",
+        "|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
 
     for index, result in enumerate(results, start=1):
         lines.append(
-            "| {index} | {difficulty} | {type} | {latency:.2f}s | {context_precision} | {context_recall} | {answer_relevancy} | {faithfulness} | {citation_accuracy} | {refusal_accuracy} | {error} | {question} | {answer} |".format(
+            "| {index} | {difficulty} | {type} | {behavior} | {ragas} | {latency:.2f}s | {context_precision} | {context_recall} | {answer_relevancy} | {faithfulness} | {citation_accuracy} | {refusal_accuracy} | {unsupported_claim_accuracy} | {expected_behavior_accuracy} | {error} | {question} | {answer} |".format(
                 index=index,
                 difficulty=result.difficulty,
-                type="answerable" if result.is_answerable else "unanswerable",
+                type=result.question_type,
+                behavior=result.expected_behavior,
+                ragas="yes" if _is_ragas_metric_result(result) else "no",
                 latency=result.latency_seconds,
                 context_precision=_format_percent(result.context_precision),
                 context_recall=_format_percent(result.context_recall),
@@ -304,6 +334,8 @@ def write_core_report(
                 faithfulness=_format_percent(result.faithfulness),
                 citation_accuracy=_format_percent(result.citation_accuracy),
                 refusal_accuracy=_format_percent(result.refusal_accuracy),
+                unsupported_claim_accuracy=_format_percent(result.unsupported_claim_accuracy),
+                expected_behavior_accuracy=_format_percent(result.expected_behavior_accuracy),
                 error=_escape_markdown_table(_shorten(result.error, 80)),
                 question=_escape_markdown_table(result.question),
                 answer=_escape_markdown_table(_shorten(result.answer, 180)),
@@ -318,13 +350,16 @@ def summarize_core_results(results: list[CoreEvalResult]) -> dict[str, float | N
     """Compute the seven required project metrics."""
 
     successful = [result for result in results if result.status == "success"]
+    ragas_results = _ragas_metric_results(results)
     return {
-        "context_precision": _mean_optional(result.context_precision for result in results),
-        "context_recall": _mean_optional(result.context_recall for result in results),
-        "answer_relevancy": _mean_optional(result.answer_relevancy for result in results),
-        "faithfulness": _mean_optional(result.faithfulness for result in results),
-        "citation_accuracy": _mean_optional(result.citation_accuracy for result in results),
+        "context_precision": _mean_optional(result.context_precision for result in ragas_results),
+        "context_recall": _mean_optional(result.context_recall for result in ragas_results),
+        "answer_relevancy": _mean_optional(result.answer_relevancy for result in ragas_results),
+        "faithfulness": _mean_optional(result.faithfulness for result in ragas_results),
+        "citation_accuracy": _mean_optional(result.citation_accuracy for result in ragas_results),
         "refusal_accuracy": _mean_optional(result.refusal_accuracy for result in results),
+        "unsupported_claim_accuracy": _mean_optional(result.unsupported_claim_accuracy for result in results),
+        "expected_behavior_accuracy": _mean_optional(result.expected_behavior_accuracy for result in results),
         "average_latency_seconds": (
             sum(result.latency_seconds for result in successful) / len(successful)
             if successful
@@ -362,14 +397,20 @@ def _score_local_metrics(
 
     citation_accuracy = None
     refusal_accuracy = None
-    if question.is_answerable:
+    unsupported_claim_accuracy = None
+    expected_behavior_accuracy = _score_expected_behavior(question, answer)
+    if _is_ragas_question(question):
         citation_accuracy = _score_citation_accuracy(question, answer, retrieved_chunks)
-    else:
+    if question.expected_behavior == "refuse":
         refusal_accuracy = 1.0 if _looks_like_refusal(answer) else 0.0
+    if question.expected_behavior == "state_not_supported":
+        unsupported_claim_accuracy = 1.0 if _looks_like_unsupported_claim_answer(answer) else 0.0
 
     return CoreEvalResult(
         question=question.question,
         difficulty=question.difficulty,
+        question_type=question.question_type,
+        expected_behavior=question.expected_behavior,
         is_answerable=question.is_answerable,
         expected_answer=question.expected_answer,
         answer=answer,
@@ -382,6 +423,8 @@ def _score_local_metrics(
         sources=response.get("sources", []),
         citation_accuracy=citation_accuracy,
         refusal_accuracy=refusal_accuracy,
+        unsupported_claim_accuracy=unsupported_claim_accuracy,
+        expected_behavior_accuracy=expected_behavior_accuracy,
         metric_errors={},
     )
 
@@ -417,6 +460,8 @@ def _error_result(
     return CoreEvalResult(
         question=question.question,
         difficulty=question.difficulty,
+        question_type=question.question_type,
+        expected_behavior=question.expected_behavior,
         is_answerable=question.is_answerable,
         expected_answer=question.expected_answer,
         answer="",
@@ -427,8 +472,10 @@ def _error_result(
         retrieved_contexts=[],
         retrieved_sources=[],
         sources=[],
-        citation_accuracy=0.0 if question.is_answerable else None,
-        refusal_accuracy=0.0 if not question.is_answerable else None,
+        citation_accuracy=0.0 if _is_ragas_question(question) else None,
+        refusal_accuracy=0.0 if question.expected_behavior == "refuse" else None,
+        unsupported_claim_accuracy=0.0 if question.expected_behavior == "state_not_supported" else None,
+        expected_behavior_accuracy=0.0 if question.expected_behavior != "answer" else None,
         metric_errors={},
     )
 
@@ -442,7 +489,33 @@ def _should_run_judge(
         return False
     if not result.retrieved_contexts:
         return False
-    return question.is_answerable or include_unanswerable
+    if _is_ragas_question(question):
+        return True
+    return include_unanswerable
+
+
+def _is_ragas_question(question: EvaluationQuestion) -> bool:
+    return question.is_answerable and question.question_type in RAGAS_QUESTION_TYPES
+
+
+def _is_ragas_metric_result(result: CoreEvalResult) -> bool:
+    return result.is_answerable and result.question_type in RAGAS_QUESTION_TYPES
+
+
+def _ragas_metric_results(results: list[CoreEvalResult]) -> list[CoreEvalResult]:
+    return [
+        result
+        for result in results
+        if result.status == "success" and _is_ragas_metric_result(result)
+    ]
+
+
+def _behavior_metric_results(results: list[CoreEvalResult]) -> list[CoreEvalResult]:
+    return [
+        result
+        for result in results
+        if result.status == "success" and result.expected_behavior != "answer"
+    ]
 
 
 def _with_judge_metrics(
@@ -725,25 +798,115 @@ def _keyword_matches(keyword: str, text: str) -> bool:
     keyword = keyword.strip()
     if not keyword:
         return False
-    if keyword.lower() in text.lower():
+    keyword_normalized = _normalize_keyword_text(keyword)
+    text_normalized = _normalize_keyword_text(text)
+    if keyword_normalized in text_normalized:
         return True
-    return lexical_similarity(keyword, text) >= 0.6
+    if _compact_alnum(keyword_normalized) and _compact_alnum(keyword_normalized) in _compact_alnum(text_normalized):
+        return True
+    return lexical_similarity(keyword_normalized, text_normalized) >= 0.6
+
+
+def _normalize_keyword_text(value: str) -> str:
+    return (
+        value.lower()
+        .replace("q1", " quarter 1 ")
+        .replace("q2", " quarter 2 ")
+        .replace("q3", " quarter 3 ")
+        .replace("q4", " quarter 4 ")
+        .replace("-", " ")
+        .replace("_", " ")
+    )
+
+
+def _compact_alnum(value: str) -> str:
+    return "".join(character for character in value if character.isalnum())
 
 
 def _looks_like_refusal(answer: str) -> bool:
     normalized = " ".join(answer.lower().split())
+    normalized_without_citations = re.sub(
+        r"\[\d+(?:\s*,\s*\d+)*\]",
+        "",
+        normalized,
+    ).strip(". ")
     refusal_markers = [
         REFUSAL_EN.lower(),
         REFUSAL_VI.lower(),
         "could not find",
+        "couldn't find",
         "cannot find",
+        "can't find",
+        "did not find",
+        "didn't find",
+        "do not find",
+        "don't find",
         "not enough information",
         "insufficient information",
+        "not supported by the provided document",
+        "not supported by the document",
         "khong tim thay",
         "khong co thong tin",
         "khong du thong tin",
+        "không tìm thấy",
+        "không có thông tin",
+        "không đủ thông tin",
     ]
-    return any(marker in normalized for marker in refusal_markers)
+    if any(marker in normalized for marker in refusal_markers):
+        return True
+
+    no_info_patterns = (
+        r"^(no,\s*)?(the\s+)?(document|paper|report|article|context|provided document|provided context)\s+"
+        r"(does not|doesn't|do not|don't)\s+"
+        r"(address|mention|estimate|use|study|discuss|provide|include|contain|cover)\b",
+        r"^(the\s+)?(document|paper|report|article|context|provided document|provided context)\s+"
+        r"(does not|doesn't|do not|don't)\s+"
+        r"(address|mention|estimate|use|study|discuss|provide|include|contain|cover)\b",
+        r"\b(not found|not available|not provided|not discussed|not mentioned)\s+"
+        r"(in|within)\s+(the\s+)?(document|paper|report|article|context|provided document|provided context)\b",
+    )
+    return any(re.search(pattern, normalized_without_citations) for pattern in no_info_patterns)
+
+
+def _looks_like_unsupported_claim_answer(answer: str) -> bool:
+    normalized = " ".join(answer.lower().split())
+    normalized_without_citations = re.sub(
+        r"\[\d+(?:\s*,\s*\d+)*\]",
+        "",
+        normalized,
+    ).strip(". ")
+    markers = (
+        "does not support",
+        "do not support",
+        "not support",
+        "not supported by the provided document",
+        "not supported by the document",
+        "not supported by this document",
+        "not supported",
+        "does not provide support",
+        "doesn't provide support",
+        "does not say",
+        "doesn't say",
+        "does not claim",
+        "doesn't claim",
+        "no evidence",
+        "not enough evidence",
+        "khong ho tro",
+        "khong noi",
+    )
+    if any(marker in normalized_without_citations for marker in markers):
+        return True
+    return _looks_like_refusal(answer)
+
+
+def _score_expected_behavior(question: EvaluationQuestion, answer: str) -> float | None:
+    if question.expected_behavior == "answer":
+        return 0.0 if _looks_like_refusal(answer) else 1.0
+    if question.expected_behavior == "refuse":
+        return 1.0 if _looks_like_refusal(answer) else 0.0
+    if question.expected_behavior == "state_not_supported":
+        return 1.0 if _looks_like_unsupported_claim_answer(answer) else 0.0
+    return None
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -830,6 +993,20 @@ def _parse_keywords(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(value).split(";") if part.strip())
 
 
+def _default_question_type(row: dict[str, str]) -> str:
+    value = row.get("question_type", "").strip()
+    if value:
+        return value
+    return "answerable" if _parse_bool(row.get("is_answerable", "")) else "true_out_of_scope"
+
+
+def _default_expected_behavior(row: dict[str, str]) -> str:
+    value = row.get("expected_behavior", "").strip()
+    if value:
+        return value
+    return "answer" if _parse_bool(row.get("is_answerable", "")) else "refuse"
+
+
 def _parse_optional_int(value: str) -> int | None:
     value = str(value).strip()
     if not value:
@@ -841,8 +1018,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the RAG app with core metrics only.")
     parser.add_argument("--questions", type=Path, default=Path("evaluation/questions.csv"))
     parser.add_argument("--documents-dir", type=Path, default=Path("data/samples"))
-    parser.add_argument("--output", type=Path, default=Path("evaluation/results.csv"))
-    parser.add_argument("--report-output", type=Path, default=Path("evaluation/results.md"))
+    parser.add_argument("--output", type=Path, default=Path("evaluation/results/ragas_core_results.csv"))
+    parser.add_argument("--report-output", type=Path, default=Path("evaluation/results/ragas_core_report.md"))
     parser.add_argument("--judge-model", default=os.getenv("EVAL_JUDGE_MODEL", "gemini-2.5-flash"))
     parser.add_argument("--judge-provider", default=os.getenv("EVAL_JUDGE_PROVIDER", "google"))
     parser.add_argument("--top-k", type=int, default=5)

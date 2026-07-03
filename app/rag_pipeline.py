@@ -7,11 +7,21 @@ import time
 from typing import Any, Callable
 
 from app.config import AppConfig, get_config
+from app.answer_postprocessor import (
+    looks_like_refusal,
+    postprocess_answer_behavior,
+)
+from app.behavior_classifier import classify_expected_behavior
+from app.citation_validator import post_check_citations
+from app.context_support import NO_SUPPORT, estimate_context_support
 from app.document_loader import DocumentLoader
 from app.embedding_model import EmbeddingModel
 from app.llm_client import LLMClient
 from app.prompt_template import (
+    answer_needs_repair,
     answer_language_mismatch,
+    build_answer_required_prompt,
+    build_answer_repair_prompt,
     build_prompt,
     build_language_repair_prompt,
     extract_sources,
@@ -20,7 +30,8 @@ from app.prompt_template import (
 )
 from app.processing_debug import log_event, text_stats
 from app.query_intent import detect_query_intent, retrieval_plan_for_intent
-from app.query_rewriter import rewrite_query_for_retrieval
+from app.query_profiles import QueryProfile, load_query_profile
+from app.query_rewriter import build_retrieval_query
 from app.retriever import Retriever
 from app.reranker import Reranker
 from app.text_preprocessor import VietnameseTextPreprocessor
@@ -41,6 +52,7 @@ class RAGPipeline:
         retriever: Any,
         llm: Any,
         indexing_batch_size: int = 128,
+        query_profile: QueryProfile | None = None,
     ):
         if indexing_batch_size <= 0:
             raise ValueError("indexing_batch_size must be greater than 0.")
@@ -53,6 +65,7 @@ class RAGPipeline:
         self.retriever = retriever
         self.llm = llm
         self.indexing_batch_size = indexing_batch_size
+        self.query_profile = query_profile or load_query_profile()
 
     def ingest_document(
         self,
@@ -157,7 +170,12 @@ class RAGPipeline:
             }
 
         intent = detect_query_intent(clean_question)
-        retrieval_query = rewrite_query_for_retrieval(clean_question, chat_history)
+        expected_behavior = classify_expected_behavior(clean_question)
+        retrieval_query = build_retrieval_query(
+            clean_question,
+            chat_history,
+            query_profile=self.query_profile,
+        )
         retrieval_plan = retrieval_plan_for_intent(
             intent=intent,
             default_top_k=self.retriever.top_k,
@@ -169,6 +187,7 @@ class RAGPipeline:
             similarity_threshold=retrieval_plan.similarity_threshold,
             auto=True,
             intent=intent,
+            original_question=clean_question,
         )
 
         if not retrieved_chunks:
@@ -178,11 +197,14 @@ class RAGPipeline:
                 "retrieved_chunks": [],
             }
 
+        support_level = estimate_context_support(clean_question, retrieved_chunks)
         prompt = build_prompt(
             question=clean_question,
             retrieved_chunks=retrieved_chunks,
             chat_history=chat_history,
             intent=intent,
+            expected_behavior=expected_behavior,
+            profile_instruction=self.query_profile.prompt_extension,
         )
         raw_answer = self._generate_answer(prompt, stream_callback=stream_callback)
         answer = normalize_answer(
@@ -198,6 +220,82 @@ class RAGPipeline:
             )
             if stream_callback:
                 stream_callback(answer)
+
+        if answer_needs_repair(answer):
+            answer = normalize_answer(
+                self.llm.generate(
+                    build_answer_repair_prompt(
+                        answer=answer,
+                        question=clean_question,
+                        retrieved_chunks=retrieved_chunks,
+                        intent=intent,
+                        expected_behavior=expected_behavior,
+                        profile_instruction=self.query_profile.prompt_extension,
+                    )
+                ),
+                question=clean_question,
+                retrieved_chunks=retrieved_chunks,
+            )
+            if answer_language_mismatch(answer, clean_question):
+                answer = normalize_answer(
+                    self.llm.generate(build_language_repair_prompt(answer, clean_question)),
+                    question=clean_question,
+                    retrieved_chunks=retrieved_chunks,
+                )
+            if answer_needs_repair(answer):
+                if support_level == NO_SUPPORT:
+                    answer = refusal_for_question(clean_question)
+                else:
+                    answer = normalize_answer(
+                        self.llm.generate(
+                            build_answer_required_prompt(
+                                answer=answer,
+                                question=clean_question,
+                                retrieved_chunks=retrieved_chunks,
+                                intent=intent,
+                                expected_behavior=expected_behavior,
+                                profile_instruction=self.query_profile.prompt_extension,
+                            )
+                        ),
+                        question=clean_question,
+                        retrieved_chunks=retrieved_chunks,
+                    )
+            if stream_callback:
+                stream_callback(answer)
+
+        if looks_like_refusal(answer) and support_level != NO_SUPPORT:
+            answer = normalize_answer(
+                self.llm.generate(
+                    build_answer_required_prompt(
+                        answer=answer,
+                        question=clean_question,
+                        retrieved_chunks=retrieved_chunks,
+                        intent=intent,
+                        expected_behavior=expected_behavior,
+                        profile_instruction=self.query_profile.prompt_extension,
+                    )
+                ),
+                question=clean_question,
+                retrieved_chunks=retrieved_chunks,
+            )
+            if answer_language_mismatch(answer, clean_question):
+                answer = normalize_answer(
+                    self.llm.generate(build_language_repair_prompt(answer, clean_question)),
+                    question=clean_question,
+                    retrieved_chunks=retrieved_chunks,
+                )
+            if answer_needs_repair(answer):
+                answer = refusal_for_question(clean_question)
+            if stream_callback:
+                stream_callback(answer)
+
+        answer = postprocess_answer_behavior(
+            answer=answer,
+            question=clean_question,
+            support_level=support_level,
+            expected_behavior=expected_behavior,
+        )
+        answer = post_check_citations(answer, clean_question, retrieved_chunks)
 
         return {
             "answer": answer,
@@ -236,6 +334,7 @@ def create_default_pipeline(
     """Create a production pipeline from application configuration."""
 
     config = config or get_config()
+    query_profile = load_query_profile(config.document_profile)
     embedder = EmbeddingModel(
         config.embedding_model,
         batch_size=config.embedding_batch_size,
@@ -258,6 +357,9 @@ def create_default_pipeline(
         use_hybrid_search=config.use_hybrid_search,
         use_mmr=config.use_mmr,
         reranker=Reranker(model_name=config.reranker_model),
+        query_profile=query_profile,
+        use_multi_query=config.use_multi_query,
+        multi_query_count=config.multi_query_count,
     )
     llm = LLMClient(
         provider=config.llm_provider,
@@ -275,6 +377,7 @@ def create_default_pipeline(
         retriever=retriever,
         llm=llm,
         indexing_batch_size=config.indexing_batch_size,
+        query_profile=query_profile,
     )
 
 
@@ -357,6 +460,10 @@ def _index_chunks_with_progress(
 
 def _batches(items: list[Any], batch_size: int) -> list[list[Any]]:
     return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def _should_retry_refusal(question: str, retrieved_chunks: list[dict[str, Any]]) -> bool:
+    return estimate_context_support(question, retrieved_chunks) != NO_SUPPORT
 
 
 

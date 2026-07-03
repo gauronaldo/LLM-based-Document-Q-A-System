@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.keyword_search import bm25_search, lexical_similarity, tokenize
+from app.query_profiles import QueryProfile, load_query_profile
 from app.reranker import Reranker
 
 
@@ -36,6 +37,10 @@ CONTENT_STOPWORDS = {
     "did",
     "do",
     "does",
+    "finding",
+    "findings",
+    "find",
+    "finds",
     "for",
     "from",
     "give",
@@ -50,12 +55,20 @@ CONTENT_STOPWORDS = {
     "on",
     "or",
     "overall",
+    "outcome",
+    "outcomes",
     "paper",
     "please",
     "provide",
+    "related",
+    "retrieval",
+    "result",
+    "results",
     "show",
+    "studied",
     "study",
     "tell",
+    "terms",
     "the",
     "this",
     "to",
@@ -63,7 +76,6 @@ CONTENT_STOPWORDS = {
     "where",
     "why",
     "with",
-    "ai",
     "cac",
     "các",
     "cua",
@@ -163,6 +175,28 @@ ENTITY_START_STOPWORDS = {
 }
 
 
+ENGLISH_ENTITY_START_STOPWORDS = {
+    "Are",
+    "Can",
+    "Could",
+    "Did",
+    "Do",
+    "Does",
+    "How",
+    "Is",
+    "Should",
+    "Was",
+    "Were",
+    "What",
+    "When",
+    "Where",
+    "Which",
+    "Who",
+    "Why",
+}
+ENTITY_START_STOPWORDS = ENTITY_START_STOPWORDS | ENGLISH_ENTITY_START_STOPWORDS
+
+
 class Retriever:
     """Encode questions, run hybrid search, rerank, and filter evidence."""
 
@@ -176,6 +210,9 @@ class Retriever:
         use_hybrid_search: bool = True,
         use_mmr: bool = True,
         reranker: Reranker | None = None,
+        query_profile: QueryProfile | None = None,
+        use_multi_query: bool = False,
+        multi_query_count: int = 4,
     ):
         if top_k <= 0:
             raise ValueError("top_k must be greater than 0.")
@@ -192,6 +229,9 @@ class Retriever:
         self.use_hybrid_search = use_hybrid_search
         self.use_mmr = use_mmr
         self.reranker = reranker or Reranker()
+        self.query_profile = query_profile or load_query_profile()
+        self.use_multi_query = use_multi_query
+        self.multi_query_count = max(1, multi_query_count)
         self._all_chunks_cache: list[dict[str, Any]] | None = None
         self._searchable_chunks_cache: list[dict[str, Any]] | None = None
 
@@ -203,16 +243,19 @@ class Retriever:
         candidate_k: int | None = None,
         auto: bool = False,
         intent: str | None = None,
+        original_question: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return relevant, diverse chunks for a question."""
 
         clean_question = question.strip()
         if not clean_question:
             return []
+        answer_question = (original_question or clean_question).strip() or clean_question
+        guard_question = clean_question
 
         if auto:
             plan = self._auto_retrieval_plan(
-                clean_question,
+                answer_question,
                 intent=intent,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
@@ -231,12 +274,19 @@ class Retriever:
         if search_top_k <= 0:
             raise ValueError("top_k must be greater than 0.")
 
-        vector_results = self._vector_search(clean_question, candidate_count)
-        keyword_results = self._keyword_search(clean_question, candidate_count)
-        section_results = self._section_search(clean_question, candidate_count)
-
-        candidates = self._merge_results(vector_results, keyword_results, section_results)
-        candidates = _filter_or_penalize_entity_mismatches(clean_question, candidates)
+        if self.use_multi_query:
+            candidates = self._multi_query_candidates(clean_question, candidate_count)
+        else:
+            vector_results = self._vector_search(clean_question, candidate_count)
+            keyword_results = self._keyword_search(clean_question, candidate_count)
+            section_results = self._section_search(clean_question, candidate_count)
+            candidates = self._merge_results(
+                vector_results,
+                keyword_results,
+                section_results,
+                query=clean_question,
+            )
+        candidates = _filter_or_penalize_entity_mismatches(guard_question, candidates)
         candidates = [
             result for result in candidates if float(result.get("score", 0.0)) >= threshold
         ]
@@ -244,11 +294,11 @@ class Retriever:
             return []
 
         candidates = sorted(candidates, key=lambda result: result.get("score", 0.0), reverse=True)
-        reranked = self._maybe_rerank(clean_question, candidates, search_top_k, auto=auto)
+        reranked = self._maybe_rerank(guard_question, candidates, search_top_k, auto=auto)
 
-        if self.use_mmr:
+        if self._should_use_mmr(answer_question, intent, search_top_k):
             selected = self._select_with_preserved_top_candidate(
-                clean_question,
+                guard_question,
                 reranked,
                 top_k=search_top_k,
             )
@@ -258,15 +308,41 @@ class Retriever:
         expanded = [
             self._expand_parent_context(
                 result,
-                query=clean_question,
+                query=guard_question,
                 force=force_parent_context,
             )
             for result in selected
         ]
-        if not self._has_sufficient_evidence(clean_question, expanded):
+        if not self._has_sufficient_evidence(guard_question, expanded):
             return []
 
         return expanded
+
+    def _multi_query_candidates(self, question: str, candidate_k: int) -> list[dict[str, Any]]:
+        query_variants = _query_variants(question, self.multi_query_count)
+        if len(query_variants) <= 1:
+            vector_results = self._vector_search(question, candidate_k)
+            keyword_results = self._keyword_search(question, candidate_k)
+            section_results = self._section_search(question, candidate_k)
+            return self._merge_results(vector_results, keyword_results, section_results)
+
+        ranked_lists = []
+        for variant in query_variants:
+            vector_results = self._vector_search(variant, candidate_k)
+            keyword_results = self._keyword_search(variant, candidate_k)
+            section_results = self._section_search(variant, candidate_k)
+            ranked = sorted(
+                self._merge_results(
+                    vector_results,
+                    keyword_results,
+                    section_results,
+                    query=variant,
+                ),
+                key=lambda result: result.get("score", 0.0),
+                reverse=True,
+            )
+            ranked_lists.append(ranked[:candidate_k])
+        return _reciprocal_rank_fusion(ranked_lists, top_k=candidate_k)
 
     def clear_cache(self) -> None:
         """Clear cached chunk/index data after vector store changes."""
@@ -322,6 +398,13 @@ class Retriever:
                 continue
 
             section_score = _section_title_similarity(question, section_title)
+            profile_boost = self.query_profile.section_boost(
+                question,
+                section_title,
+                chunk.get("text", ""),
+                _content_terms(question),
+            )
+            section_score = max(section_score, profile_boost)
             if section_score <= 0:
                 continue
 
@@ -362,6 +445,7 @@ class Retriever:
         vector_results: list[dict[str, Any]],
         keyword_results: list[dict[str, Any]],
         section_results: list[dict[str, Any]],
+        query: str = "",
     ) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
 
@@ -412,8 +496,29 @@ class Retriever:
             if entity_score:
                 item["entity_score"] = entity_score
                 item["score"] = max(float(item.get("score", 0.0)), entity_score)
+            evidence_boost = self._profile_evidence_boost(query, item)
+            if evidence_boost:
+                item["profile_evidence_boost"] = evidence_boost
+                item["score"] = min(1.0, float(item.get("score", 0.0)) + evidence_boost)
 
         return list(merged.values())
+
+    def _profile_evidence_boost(self, query: str, item: dict[str, Any]) -> float:
+        if not query:
+            return 0.0
+        metadata = item.get("metadata", {})
+        return self.query_profile.evidence_boost(
+            query=query,
+            section_title=str(metadata.get("section_title", "")),
+            chunk_text=" ".join(
+                str(part)
+                for part in (
+                    item.get("matched_text", ""),
+                    item.get("text", ""),
+                )
+                if part
+            ),
+        )
 
     def _auto_retrieval_plan(
         self,
@@ -485,6 +590,15 @@ class Retriever:
         top_score = float(candidates[0].get("score", 0.0))
         comparison_window = candidates[1: min(len(candidates), 6)]
         return any(top_score - float(candidate.get("score", 0.0)) <= 0.08 for candidate in comparison_window)
+
+    def _should_use_mmr(self, query: str, intent: str | None, top_k: int) -> bool:
+        if not self.use_mmr:
+            return False
+        if intent in {"summary", "comparison"}:
+            return True
+        if top_k >= 8 and len(_content_terms(query)) >= 5:
+            return True
+        return False
 
     @staticmethod
     def _expand_parent_context(
@@ -603,8 +717,86 @@ def _content_terms(text: str) -> list[str]:
     return [
         token
         for token in tokenize(text)
-        if len(token) > 2 and token not in CONTENT_STOPWORDS
+        if (len(token) > 2 or token == "ai") and token not in CONTENT_STOPWORDS
     ]
+
+
+def _query_variants(question: str, max_variants: int) -> list[str]:
+    clean = question.strip()
+    if max_variants <= 1:
+        return [clean]
+
+    parts = [part.strip() for part in clean.splitlines() if part.strip()]
+    base = parts[0] if parts else clean
+    variants = [clean]
+    if base != clean:
+        variants.append(base)
+
+    related_terms = _related_terms_from_query(clean)
+    for term in related_terms:
+        variants.append(f"{base} {term}")
+        if len(variants) >= max_variants:
+            break
+
+    deduped = []
+    seen = set()
+    for variant in variants:
+        key = variant.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(variant)
+    return deduped[:max_variants] or [clean]
+
+
+def _related_terms_from_query(query: str) -> list[str]:
+    marker = "related retrieval terms:"
+    lowered = query.lower()
+    if marker not in lowered:
+        return []
+    related = query[lowered.index(marker) + len(marker):]
+    terms = []
+    for part in related.replace("\n", ",").split(","):
+        term = part.strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _reciprocal_rank_fusion(
+    ranked_lists: list[list[dict[str, Any]]],
+    top_k: int,
+    k: int = 60,
+) -> list[dict[str, Any]]:
+    fused: dict[str, dict[str, Any]] = {}
+    scores: dict[str, float] = {}
+
+    for ranked in ranked_lists:
+        for rank, item in enumerate(ranked, start=1):
+            chunk_id = item.get("chunk_id")
+            if not chunk_id:
+                continue
+            if chunk_id not in fused or float(item.get("score", 0.0)) > float(fused[chunk_id].get("score", 0.0)):
+                fused[chunk_id] = dict(item)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+
+    results = []
+    max_score = max(scores.values()) if scores else 0.0
+    for chunk_id, item in fused.items():
+        rrf_score = scores.get(chunk_id, 0.0)
+        result = dict(item)
+        result["rrf_score"] = rrf_score
+        normalized_rrf = rrf_score / max_score if max_score else 0.0
+        base_score = float(result.get("score", 0.0))
+        result["base_score"] = base_score
+        result["rank_score"] = normalized_rrf
+        result["score"] = min(1.0, 0.85 * base_score + 0.15 * normalized_rrf)
+        results.append(result)
+
+    return sorted(
+        results,
+        key=lambda result: (result.get("rrf_score", 0.0), result.get("score", 0.0)),
+        reverse=True,
+    )[:top_k]
 
 
 def _claim_terms(text: str) -> list[str]:

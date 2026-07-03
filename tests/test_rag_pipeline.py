@@ -1,5 +1,5 @@
 from app.prompt_template import REFUSAL_EN, REFUSAL_VI
-from app.rag_pipeline import RAGPipeline
+from app.rag_pipeline import RAGPipeline, _should_retry_refusal
 
 
 class FakeDocumentLoader:
@@ -233,6 +233,126 @@ def test_answer_question_repairs_language_mismatch_for_english_question() -> Non
     assert result["answer"] == "The paper studies minimum wage effects. [1]"
     assert len(llm.prompts) == 2
     assert "Rewrite the answer below in English only" in llm.prompts[1]
+
+
+def test_answer_question_repairs_citation_only_answer() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_1_chunk_0",
+            "text": "The paper studies formal wages and informal wages.",
+            "metadata": {"file_name": "paper.pdf", "page": 1},
+            "score": 0.9,
+        }
+    ]
+    llm = FakeLLM(
+        responses=[
+            "[1, 2]",
+            "The paper studies formal wages and informal wages. [1]",
+        ]
+    )
+    pipeline, _, llm = make_pipeline_with_llm(retrieved, llm)
+
+    result = pipeline.answer_question("What outcomes does the paper study?")
+
+    assert result["answer"] == "The paper studies formal wages and informal wages. [1]"
+    assert len(llm.prompts) == 2
+    assert "previous answer was invalid" in llm.prompts[1]
+    assert "Do not return only citations" in llm.prompts[1]
+
+
+def test_answer_question_repairs_meta_answer() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_1_chunk_0",
+            "text": "The paper uses an unexpected real minimum wage increase.",
+            "metadata": {"file_name": "paper.pdf", "page": 1},
+            "score": 0.9,
+        }
+    ]
+    llm = FakeLLM(
+        responses=[
+            "Note: I've answered directly first, then added citations. [1]",
+            "The paper uses an unexpected real minimum wage increase. [1]",
+        ]
+    )
+    pipeline, _, llm = make_pipeline_with_llm(retrieved, llm)
+
+    result = pipeline.answer_question("What shock does the paper use?")
+
+    assert result["answer"] == "The paper uses an unexpected real minimum wage increase. [1]"
+    assert len(llm.prompts) == 2
+
+
+def test_answer_question_retries_refusal_when_context_is_relevant() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_8_chunk_0",
+            "text": (
+                "A commission representing the government, firms, and unions "
+                "negotiated Colombia's minimum wage."
+            ),
+            "metadata": {"file_name": "paper.pdf", "page": 8},
+            "score": 0.9,
+        }
+    ]
+    llm = FakeLLM(
+        responses=[
+            REFUSAL_EN,
+            "A commission representing the government, firms, and unions determined the minimum wage. [1]",
+        ]
+    )
+    pipeline, _, llm = make_pipeline_with_llm(retrieved, llm)
+
+    result = pipeline.answer_question(
+        "What institutional process determined Colombia's minimum wage?"
+    )
+
+    assert result["answer"] == (
+        "A commission representing the government, firms, and unions determined the minimum wage. [1]"
+    )
+    assert len(llm.prompts) == 2
+    assert "retrieved Context contains relevant evidence" in llm.prompts[1]
+
+
+def test_refusal_retry_uses_moderate_evidence_not_exact_keyword_match() -> None:
+    chunks = [
+        {
+            "chunk_id": "doc_page_8_chunk_0",
+            "text": "The paper explains sample splits for workers by education level and sex.",
+            "metadata": {"file_name": "paper.pdf", "page": 8},
+            "base_score": 0.66,
+        }
+    ]
+
+    assert _should_retry_refusal(
+        "Why do the authors focus on low-education workers and split the sample by sex?",
+        chunks,
+    ) is True
+
+
+def test_answer_question_does_not_fallback_to_refusal_when_supported_repair_fails() -> None:
+    retrieved = [
+        {
+            "chunk_id": "doc_page_1_chunk_0",
+            "text": "The paper uses an unexpected real minimum wage increase.",
+            "metadata": {"file_name": "paper.pdf", "page": 1},
+            "score": 0.9,
+        }
+    ]
+    llm = FakeLLM(
+        responses=[
+            "[1, 2]",
+            "[1] paper.pdf, Page 1",
+            "The paper uses an unexpected real minimum wage increase. [1]",
+        ]
+    )
+    pipeline, _, llm = make_pipeline_with_llm(retrieved, llm)
+
+    result = pipeline.answer_question("What shock does the paper use?")
+
+    assert result["answer"] == "The paper uses an unexpected real minimum wage increase. [1]"
+    assert len(llm.prompts) == 3
+    assert "retrieved Context contains relevant evidence" in llm.prompts[2]
 
 
 def test_answer_question_vietnamese_refusal() -> None:

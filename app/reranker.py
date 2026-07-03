@@ -67,8 +67,17 @@ class RerankerError(Exception):
 class Reranker:
     """Rerank chunks with an optional cross-encoder and a lexical fallback."""
 
+    MODEL_ALIASES = {
+        "bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",
+        "baai/bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",
+    }
+
     def __init__(self, model_name: str | None = None):
-        self.model_name = model_name
+        self.model_name = (
+            self.MODEL_ALIASES.get(model_name.strip().lower(), model_name)
+            if model_name
+            else None
+        )
         self._model: Any | None = None
 
     def rerank(
@@ -100,7 +109,10 @@ class Reranker:
         if self._model is None:
             from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(self.model_name)
+            try:
+                self._model = CrossEncoder(self.model_name, trust_remote_code=True)
+            except TypeError:
+                self._model = CrossEncoder(self.model_name)
 
         pairs = [(query, _rerank_text(chunk)) for chunk in chunks]
         scores = self._model.predict(pairs)

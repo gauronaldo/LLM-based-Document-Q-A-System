@@ -1,4 +1,5 @@
-from app.query_rewriter import rewrite_query_for_retrieval
+from app.query_profiles import QueryProfile
+from app.query_rewriter import build_retrieval_query, rewrite_query_for_retrieval
 
 
 def test_rewrite_keeps_standalone_question() -> None:
@@ -48,6 +49,18 @@ def test_rewrite_keeps_vietnamese_standalone_question() -> None:
         question,
         [{"role": "user", "content": "Câu hỏi trước"}],
     ) == question
+
+
+def test_build_retrieval_query_applies_configurable_expansion() -> None:
+    profile = QueryProfile(
+        name="test",
+        query_expansions={"source": ("data", "origin")},
+        section_intents={},
+    )
+
+    rewritten = build_retrieval_query("Where does the source come from?", query_profile=profile)
+
+    assert rewritten == "Where does the source come from?\nRelated retrieval terms: data, origin"
 
 
 def test_rewrite_keeps_vietnamese_entity_attribute_question() -> None:

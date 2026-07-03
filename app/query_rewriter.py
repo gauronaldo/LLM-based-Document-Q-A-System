@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from app.query_profiles import QueryProfile, load_query_profile
+
 
 FOLLOW_UP_MARKERS = {
     "it",
@@ -55,6 +57,29 @@ STANDALONE_STARTERS = {
     "tom",
 }
 WORD_PATTERN = re.compile(r"[\w\u00c0-\u1ef9]+", re.UNICODE)
+DOCUMENT_SUBJECT_PATTERN = (
+    r"(?:the\s+)?(?:paper|document|article|study|report|text|source|authors?|researchers?)"
+)
+REPORTING_VERB_PATTERN = (
+    r"(?:say|state|claim|argue|mention|report|show|find|conclude|suggest|"
+    r"allow|evaluate|use|study|estimate|discuss|describe|indicate|explain)"
+)
+CLAIM_PREFIX_PATTERNS = [
+    re.compile(
+        rf"^\s*(?:does|do|did)\s+{DOCUMENT_SUBJECT_PATTERN}\s+"
+        rf"{REPORTING_VERB_PATTERN}\s+(?:that\s+)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*(?:is|are|was|were)\s+it\s+"
+        rf"(?:true|reported|shown|stated|claimed|argued|suggested)\s+(?:that\s+)?",
+        re.IGNORECASE,
+    ),
+]
+SUPPORT_CLAIM_PATTERN = re.compile(
+    r"^\s*(?:does|do|did)\s+(.+?)\s+support\s+(?:the\s+)?(?:claim|idea|statement)\s+that\s+",
+    re.IGNORECASE,
+)
 
 
 def rewrite_query_for_retrieval(
@@ -76,6 +101,42 @@ def rewrite_query_for_retrieval(
         return clean_question
 
     return f"{previous_user_question}\nFollow-up: {clean_question}"
+
+
+def build_retrieval_query(
+    question: str,
+    chat_history: list[dict[str, str]] | None = None,
+    query_profile: QueryProfile | None = None,
+) -> str:
+    """Rewrite follow-ups and apply configurable retrieval-only term expansion."""
+
+    rewritten = rewrite_query_for_retrieval(question, chat_history)
+    rewritten = rewrite_claim_query_for_retrieval(rewritten)
+    profile = query_profile or load_query_profile()
+    return profile.expand_query(rewritten)
+
+
+def rewrite_claim_query_for_retrieval(question: str) -> str:
+    """Strip generic yes/no scaffolding so retrieval focuses on the claim content."""
+
+    clean_question = question.strip()
+    if not clean_question:
+        return clean_question
+
+    query = clean_question.rstrip(" ?")
+    support_match = SUPPORT_CLAIM_PATTERN.match(query)
+    if support_match:
+        evidence_anchor = support_match.group(1).strip()
+        claim = query[support_match.end() :].strip()
+        return _clean_claim_query(f"{evidence_anchor} {claim}") or clean_question
+
+    for pattern in CLAIM_PREFIX_PATTERNS:
+        match = pattern.match(query)
+        if match:
+            claim = query[match.end() :].strip()
+            return _clean_claim_query(claim) or clean_question
+
+    return clean_question
 
 
 def _looks_like_follow_up(lowered_question: str) -> bool:
@@ -101,3 +162,10 @@ def _last_user_message(chat_history: list[dict[str, str]]) -> str | None:
         if message.get("role") == "user" and message.get("content"):
             return message["content"].strip()
     return None
+
+
+def _clean_claim_query(claim: str) -> str:
+    claim = re.sub(r"^\s*(?:that|whether|if)\s+", "", claim, flags=re.IGNORECASE)
+    claim = re.sub(r"\bto\s+use\b", "use", claim, flags=re.IGNORECASE)
+    claim = re.sub(r"\s+", " ", claim).strip(" .?")
+    return claim

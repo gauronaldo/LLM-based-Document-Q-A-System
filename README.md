@@ -88,10 +88,22 @@ data/
   processed/                Optional processed outputs
   samples/                  PDF samples used by evaluation
 evaluation/
-  questions.csv             Evaluation benchmark questions
-  evaluate.py               RAGAS core evaluator
-  results.csv               Generated core evaluation rows
-  results.md                Generated core evaluation report
+  README.md                 Dev/holdout/cross-document evaluation workflow
+  workflow.json             Machine-readable workflow manifest
+  questions.csv             PerezPerez2020 dev/stress-test questions
+  questions_w18347.csv      w18347 holdout validation questions
+  questions_2302_06590.csv  final RAGAS/cross-document questions
+  questions_holdout.csv     Extra holdout-style questions
+  debug_config.json         Deterministic debug thresholds
+  debug_utils.py            Shared debug/evaluation helpers
+  debug_retrieval.py        Retrieval-only debug report
+  ab_test_retrieval.py      Retrieval configuration ablation
+  debug_generation.py       Gold-context generation debug
+  freeze_config.py          Save selected config before holdout
+  run_custom_eval.py        Fast custom evaluation before RAGAS
+  evaluate.py               Final RAGAS/core evaluator
+  cache/                    Generated prediction/RAGAS caches
+  results/                  Generated debug and evaluation reports
 notebooks/
   debug_existing_pipeline.ipynb
 tests/
@@ -235,38 +247,130 @@ Question
 
 ## Evaluation
 
-Primary evaluation command:
+Use a debug-first workflow. Full RAGAS evaluation is slow, especially with local Ollama judges, so do not run it after every code change.
 
-```bash
-python -m pip install -r requirements.txt
-python -m evaluation.evaluate --judge-provider google --judge-model gemini-2.5-flash --sleep-seconds 12 --max-retries 3
+Recommended loop:
+
+```text
+dev set: tune retrieval/citation on PerezPerez2020
+-> freeze config
+-> holdout validation: custom eval on w18347
+-> final RAGAS/cross-document test on 2302.06590v1
+-> report profile, document, metrics, and limitations
 ```
 
-If `pip install` spends a long time downloading many versions of the same package, stop it with `Ctrl+C` and rerun the same install command. The evaluation packages are pinned in `requirements.txt` to reduce dependency backtracking.
+The detailed workflow lives in `evaluation/README.md` and `evaluation/workflow.json`.
 
-The core evaluator generates real chatbot answers, measures latency, scores local citation/refusal behavior, and calls RAGAS for the main RAG quality metrics. It uses `data/samples/PerezPerez2020.pdf` and `evaluation/questions.csv` by default.
+Dataset roles:
 
-`evaluation/questions.csv` is a curated benchmark with `easy`, `medium`, and `hard` questions. Easy questions test direct fact lookup, medium questions test synthesis across nearby evidence, and hard questions test interpretation, limitations, or domain-specific hard negatives.
+- `evaluation/questions.csv`: PerezPerez2020 dev / hard stress-test set
+- `evaluation/questions_w18347.csv`: w18347 holdout validation set
+- `evaluation/questions_2302_06590.csv`: final RAGAS / cross-document report set
 
-Core metrics:
+Do not tune prompts or retrieval rules from holdout failures. Use holdout results for reporting, not debugging.
 
-- Context Precision
-- Context Recall
-- Answer Relevancy
-- Faithfulness
-- Citation Accuracy
-- Refusal Accuracy
-- Average Latency
+### 1. Retrieval-Only Debug
+
+This does not call the LLM and does not call RAGAS.
+
+```bash
+python evaluation/debug_retrieval.py --limit 10 --top-k 5
+```
+
+To include answerable, hard, and out-of-scope questions in a quick pass:
+
+```bash
+python evaluation/debug_retrieval.py --limit 15 --sample-strategy stratified --top-k 5
+```
+
+Output:
+
+- `evaluation/results/retrieval_debug_report.csv`
+
+Read this first when the app gives wrong facts. The important columns are `keyword_hit_rate`, `page_hit_at_5`, `top_score`, `status`, and `failure_reason`.
+
+### 2. Retrieval Ablation
+
+Compare current retrieval, multi-query RRF, BGE-M3 embedding, BGE reranker, and full BGE without LLM calls.
+
+```bash
+python evaluation/ab_test_retrieval.py --questions evaluation/questions.csv --limit 10 --top-k 5
+```
 
 Outputs:
 
-- `evaluation/results.csv`
-- `evaluation/results.md`
+- `evaluation/results/retrieval_ablation_report.csv`
+
+Use this to check whether multi-query, BGE-M3, or BGE reranking is helping or hurting retrieval. The `citation_page_accuracy` column is a retrieval-only proxy, not final answer-level citation correctness.
+
+### 3. Generation Debug With Gold Context
+
+This isolates prompt/model behavior from retrieval. It gives the LLM the expected source pages directly.
+
+```bash
+python evaluation/debug_generation.py --sample-size 10
+```
+
+Use `--refresh-cache` after prompt/model/config changes:
+
+```bash
+python evaluation/debug_generation.py --sample-size 10 --refresh-cache
+```
+
+Output:
+
+- `evaluation/results/generation_debug_report.csv`
+
+If gold context fails, fix prompt/model/citation logic. If gold context works but normal RAG fails, fix retrieval.
+
+### 4. Custom Evaluation
+
+This runs the real pipeline but uses deterministic local metrics before RAGAS:
+
+- Keyword Hit@5
+- Keyword Recall@5
+- Page Recall@5
+- Evidence Hit@5
+- MRR
+- Citation Accuracy
+- Refusal Accuracy
+- False Refusal Rate
+- Average Latency
+
+```bash
+python evaluation/run_custom_eval.py --limit 0 --refresh-cache
+```
+
+For a faster representative sample:
+
+```bash
+python evaluation/run_custom_eval.py --limit 15 --sample-strategy stratified --refresh-cache
+```
+
+Outputs:
+
+- `evaluation/results/custom_eval_results.csv`
+- `evaluation/results/custom_eval_summary.md`
+
+Generated answers are cached in:
+
+- `evaluation/cache/predictions.csv`
+
+The cache key includes the prompt version, model/provider, embedding model, retrieval settings, and context hash, so prompt/model/config changes do not silently reuse stale generations.
+
+### 5. Final RAGAS Evaluation
+
+Only run this after the fast reports look reasonable.
+
+```bash
+python -m pip install -r requirements.txt
+python -m evaluation.evaluate --questions evaluation/questions_2302_06590.csv --judge-provider google --judge-model gemini-2.5-flash --sleep-seconds 12 --max-retries 3 --output evaluation/results/ragas_2302_06590.csv --report-output evaluation/results/ragas_2302_06590.md
+```
 
 Quick smoke test:
 
 ```bash
-python -m evaluation.evaluate --judge-provider google --judge-model gemini-2.5-flash --limit 2 --sleep-seconds 2
+python -m evaluation.evaluate --questions evaluation/questions_2302_06590.csv --judge-provider google --judge-model gemini-2.5-flash --limit 2 --sleep-seconds 2
 ```
 
 RAGAS uses Gemini as the judge via `--judge-provider google`. The script maps `GEMINI_API_KEY` to `GOOGLE_API_KEY`, uses the official `google-genai` client, and uses Google embeddings by default through `RAGAS_EMBEDDING_MODEL=gemini-embedding-001`.
@@ -275,7 +379,7 @@ To run RAGAS with a local Ollama judge instead of paid API quota:
 
 ```bash
 ollama pull llama3.1:8b
-python -m evaluation.evaluate --judge-provider ollama --judge-model llama3.1:8b --limit 2 --sleep-seconds 0
+python -m evaluation.evaluate --questions evaluation/questions_2302_06590.csv --judge-provider ollama --judge-model llama3.1:8b --limit 2 --sleep-seconds 0
 ```
 
 For Ollama judging, RAGAS uses Ollama's OpenAI-compatible endpoint at `http://localhost:11434/v1` and local Hugging Face embeddings by default. You can override these with:

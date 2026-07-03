@@ -36,3 +36,7 @@ def test_lexical_reranker_uses_section_title_metadata() -> None:
     results = Reranker().rerank("conclusion of the paper", chunks, top_k=1)
 
     assert results[0]["chunk_id"] == "conclusion"
+def test_reranker_aliases_bge_reranker() -> None:
+    reranker = Reranker("bge-reranker-v2-m3")
+
+    assert reranker.model_name == "BAAI/bge-reranker-v2-m3"

@@ -15,6 +15,9 @@ def test_default_config_values() -> None:
     assert 0 <= config.hybrid_alpha <= 1
     assert isinstance(config.use_hybrid_search, bool)
     assert isinstance(config.use_mmr, bool)
+    assert isinstance(config.use_multi_query, bool)
+    assert config.multi_query_count > 0
+    assert config.document_profile
 
 
 def test_optional_env_string_ignores_placeholders(monkeypatch) -> None:

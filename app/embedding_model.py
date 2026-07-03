@@ -21,12 +21,16 @@ class EmbeddingModel:
 
     LOCAL_HASH_MODEL_NAMES = {"local-hash", "local_hash", "hash", "hashing"}
     LOCAL_HASH_DIMENSION = 384
+    MODEL_ALIASES = {
+        "bge-m3": "BAAI/bge-m3",
+        "baai/bge-m3": "BAAI/bge-m3",
+    }
 
     def __init__(self, model_name: str, batch_size: int = 32):
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0.")
 
-        self.model_name = model_name
+        self.model_name = self.MODEL_ALIASES.get(model_name.strip().lower(), model_name)
         self.batch_size = batch_size
         self._model: Any | None = None
 
@@ -130,7 +134,10 @@ class EmbeddingModel:
         try:
             started = time.perf_counter()
             log_event("embedding_model_load_start", model_name=self.model_name)
-            self._model = SentenceTransformer(self.model_name)
+            try:
+                self._model = SentenceTransformer(self.model_name, trust_remote_code=True)
+            except TypeError:
+                self._model = SentenceTransformer(self.model_name)
             log_event(
                 "embedding_model_load_done",
                 model_name=self.model_name,
